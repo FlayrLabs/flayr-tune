@@ -6,19 +6,19 @@ namespace
 struct Preset
 {
     const char* name;
-    float retune, humanize, flex, natVib, throat, transpose, vibDepth;
+    float retune, humanize, flex, natVib, formantShift, transpose, vibDepth;
     bool formant;
 };
 
 const std::array<Preset, 8> kPresets { {
-    { "Natural Vocal",       45.0f, 40.0f, 30.0f,  0.0f, 100.0f,   0.0f,  0.0f, true  },
-    { "Pop Polish",          15.0f, 25.0f, 10.0f,  0.0f, 100.0f,   0.0f,  0.0f, true  },
-    { "Hard Tune",            0.0f,  0.0f,  0.0f,  0.0f, 100.0f,   0.0f,  0.0f, true  },
-    { "Subtle Pitch Fix",   120.0f, 60.0f, 60.0f,  0.0f, 100.0f,   0.0f,  0.0f, true  },
-    { "Lush Vibrato",        30.0f, 30.0f, 20.0f,  6.0f, 100.0f,   0.0f, 20.0f, true  },
-    { "Darker Voice",        30.0f, 30.0f, 20.0f,  0.0f, 120.0f,   0.0f,  0.0f, true  },
-    { "Octave Down Monster",  0.0f,  0.0f,  0.0f,  0.0f, 130.0f, -12.0f,  0.0f, true  },
-    { "Chipmunk",            10.0f,  0.0f,  0.0f,  0.0f, 100.0f,  12.0f,  0.0f, false },
+    { "Natural Vocal",       45.0f, 40.0f, 30.0f,  0.0f,  0.0f,   0.0f,  0.0f, true  },
+    { "Pop Polish",          15.0f, 25.0f, 10.0f,  0.0f,  0.0f,   0.0f,  0.0f, true  },
+    { "Hard Tune",            0.0f,  0.0f,  0.0f,  0.0f,  0.0f,   0.0f,  0.0f, true  },
+    { "Subtle Pitch Fix",   120.0f, 60.0f, 60.0f,  0.0f,  0.0f,   0.0f,  0.0f, true  },
+    { "Lush Vibrato",        30.0f, 30.0f, 20.0f,  6.0f,  0.0f,   0.0f, 20.0f, true  },
+    { "Darker Voice",        30.0f, 30.0f, 20.0f,  0.0f, -3.2f,   0.0f,  0.0f, true  },
+    { "Octave Down Monster",  0.0f,  0.0f,  0.0f,  0.0f, -4.5f, -12.0f,  0.0f, true  },
+    { "Chipmunk",            10.0f,  0.0f,  0.0f,  0.0f,  0.0f,  12.0f,  0.0f, false },
 } };
 } // namespace
 
@@ -30,7 +30,7 @@ FlayrTuneProcessor::FlayrTuneProcessor()
 {
     auto get = [this] (const juce::String& id) { return apvts.getRawParameterValue (id); };
     raw = { get ("retune"), get ("humanize"), get ("flex"), get ("natvib"), get ("key"), get ("scale"),
-            get ("inputType"), get ("formant"), get ("throat"), get ("transpose"), get ("concertA"),
+            get ("inputType"), get ("formant"), get ("formantShift"), get ("transpose"), get ("concertA"),
             get ("tracking"), get ("vibRate"), get ("vibDepth"), get ("vibDelay"), get ("mix"),
             get ("output"), get ("midiTarget"), get ("live"), get ("graph"), {} };
     engine.setTrack (&track);
@@ -53,10 +53,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout FlayrTuneProcessor::createLa
     std::vector<std::unique_ptr<RangedAudioParameter>> p;
 
     auto addFloat = [&p] (const char* id, const char* name, float lo, float hi, float step, float def,
-                          const char* unit, float skewCentre = -1.0f)
+                          const char* unit, float skewCentre = NAN)
     {
         NormalisableRange<float> range (lo, hi, step);
-        if (skewCentre > lo)
+        if (std::isfinite (skewCentre)) // only Retune Speed and Vibrato Onset are skewed
             range.setSkewForCentre (skewCentre);
         p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id, 1 }, name, range, def,
                                                             AudioParameterFloatAttributes().withLabel (unit)));
@@ -66,7 +66,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout FlayrTuneProcessor::createLa
     addFloat ("humanize",  "Humanize",        0.0f,  100.0f, 0.1f,   0.0f, "%");
     addFloat ("flex",      "Expression",      0.0f,  100.0f, 0.1f,   0.0f, "%");
     addFloat ("natvib",    "Natural Vibrato", -12.0f, 12.0f, 0.1f,   0.0f, "dB");
-    addFloat ("throat",    "Throat Length",   70.0f, 140.0f, 0.1f, 100.0f, "%");
+    addFloat ("formantShift", "Formant Shift", -6.0f,  6.0f, 0.1f,   0.0f, "st");
     addFloat ("concertA",  "Concert A",      430.0f, 450.0f, 0.1f, 440.0f, "Hz");
     addFloat ("tracking",  "Tracking",        0.0f,  100.0f, 0.1f,  50.0f, "%");
     addFloat ("vibRate",   "Vibrato Rate",    1.0f,   10.0f, 0.01f,  5.5f, "Hz");
@@ -124,7 +124,8 @@ tune::Params FlayrTuneProcessor::readParams() const
     p.scale = (int) raw.scale->load();
     p.inputType = (int) raw.inputType->load();
     p.formantPreserve = raw.formant->load() > 0.5f;
-    p.throat = raw.throat->load() / 100.0f;
+    // The engine models a vocal-tract length: +12 st of formant shift = half the length.
+    p.throat = std::pow (2.0f, -raw.formantShift->load() / 12.0f);
     p.transpose = raw.transpose->load();
     p.concertA = raw.concertA->load();
     p.tracking = raw.tracking->load() / 100.0f;
@@ -211,7 +212,7 @@ void FlayrTuneProcessor::setCurrentProgram (int index)
     set ("humanize", pr.humanize);
     set ("flex", pr.flex);
     set ("natvib", pr.natVib);
-    set ("throat", pr.throat);
+    set ("formantShift", pr.formantShift);
     set ("transpose", pr.transpose);
     set ("vibDepth", pr.vibDepth);
     set ("formant", pr.formant ? 1.0f : 0.0f);
@@ -293,6 +294,18 @@ void FlayrTuneProcessor::setStateInformation (const void* data, int sizeInBytes)
         return;
 
     auto tree = juce::ValueTree::fromXml (*xml);
+
+    // Projects from 1.0-1.2 stored "throat" (70-140 % tract length); convert to semitones.
+    const auto oldThroat = tree.getChildWithProperty ("id", "throat");
+    if (oldThroat.isValid() && ! tree.getChildWithProperty ("id", "formantShift").isValid())
+    {
+        const double length = juce::jlimit (0.5, 2.0, (double) oldThroat.getProperty ("value", 100.0) / 100.0);
+        juce::ValueTree shift ("PARAM");
+        shift.setProperty ("id", "formantShift", nullptr);
+        shift.setProperty ("value", juce::jlimit (-6.0, 6.0, -12.0 * std::log2 (length)), nullptr);
+        tree.appendChild (shift, nullptr);
+    }
+    tree.removeChild (oldThroat, nullptr);
     const auto trackTree = tree.getChildWithName (kTrackTag);
     if (trackTree.isValid())
         decodeTrack (track, trackTree.getProperty ("data").toString());

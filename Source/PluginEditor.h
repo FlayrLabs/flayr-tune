@@ -102,7 +102,7 @@ private:
     Knob* retune = nullptr;
     Knob* humanize = nullptr;
     Knob* flex = nullptr;
-    Knob* throat = nullptr;
+
     std::vector<Knob*> voiceRow, vibRow, outRow;
 
     float lastIn = 0.0f, lastTarget = -1.0f;

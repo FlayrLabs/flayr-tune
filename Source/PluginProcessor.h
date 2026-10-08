@@ -55,7 +55,7 @@ private:
     {
         std::atomic<float>* retune; std::atomic<float>* humanize; std::atomic<float>* flex;
         std::atomic<float>* natvib; std::atomic<float>* key; std::atomic<float>* scale;
-        std::atomic<float>* inputType; std::atomic<float>* formant; std::atomic<float>* throat;
+        std::atomic<float>* inputType; std::atomic<float>* formant; std::atomic<float>* formantShift;
         std::atomic<float>* transpose; std::atomic<float>* concertA; std::atomic<float>* tracking;
         std::atomic<float>* vibRate; std::atomic<float>* vibDepth; std::atomic<float>* vibDelay;
         std::atomic<float>* mix; std::atomic<float>* output; std::atomic<float>* midiTarget;

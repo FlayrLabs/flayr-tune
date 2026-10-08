@@ -261,7 +261,7 @@ FlayrTuneEditor::FlayrTuneEditor (FlayrTuneProcessor& p)
         addAndMakeVisible (*b);
     }
     liveBtn.setTooltip ("Live mode: near-zero latency (about 1.5 to 10 ms, depending on the voice) for tracking and "
-                        "performing. Formant and Throat are unavailable in this mode; Studio sounds best on big shifts");
+                        "performing. Studio has the best quality on big shifts");
     liveAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "live", liveBtn);
     graphBtn.setTooltip ("Graph mode: capture the vocal along the song, then draw exact pitch, lines or notes");
     graphAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "graph", graphBtn);
@@ -287,14 +287,15 @@ FlayrTuneEditor::FlayrTuneEditor (FlayrTuneProcessor& p)
     humanize = &addKnob ("humanize", "HUMANIZE", " %");
     flex = &addKnob ("flex", "EXPRESSION", " %");
 
-    throat = &addKnob ("throat", "THROAT", " %");
-    voiceRow = { throat, &addKnob ("transpose", "TRANSPOSE", " st"),
+    auto* formantShift = &addKnob ("formantShift", "FORMANT SHIFT", " st");
+    formantShift->slider.setTooltip ("Moves the voice's formants: up = brighter, smaller voice; down = deeper, bigger voice");
+    voiceRow = { formantShift, &addKnob ("transpose", "TRANSPOSE", " st"),
                  &addKnob ("concertA", "CONCERT A", " Hz"), &addKnob ("tracking", "TRACKING", " %") };
     vibRow = { &addKnob ("natvib", "NATURAL VIB", " dB"), &addKnob ("vibRate", "VIB RATE", " Hz"),
                &addKnob ("vibDepth", "VIB DEPTH", " c"), &addKnob ("vibDelay", "VIB ONSET", " ms") };
     outRow = { &addKnob ("mix", "MIX", " %"), &addKnob ("output", "OUTPUT", " dB") };
 
-    for (auto* k : { voiceRow[1], vibRow[0], outRow[1] })
+    for (auto* k : { voiceRow[0], voiceRow[1], vibRow[0], outRow[1] })
         k->slider.getProperties().set ("bipolar", true);
 
     retune->slider.setTooltip ("How fast notes are pulled to pitch. 0 = hard tune effect");
@@ -386,9 +387,6 @@ void FlayrTuneEditor::timerCallback()
         graphEditor->refresh();
 
     const bool live = proc.apvts.getRawParameterValue ("live")->load() > 0.5f;
-    formantBtn.setEnabled (! live);
-    throat->slider.setEnabled (! live);
-    throat->label.setAlpha (live ? 0.4f : 1.0f);
     if (live)
     {
         const double now = 1000.0 * proc.engine.getLiveDelaySamples() / proc.engine.getSampleRate();

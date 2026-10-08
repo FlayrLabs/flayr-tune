@@ -63,7 +63,7 @@ part, and press it again), then turn **Retune Speed**:
 | Humanize | Short notes snap fast; long held notes ease in, so they keep their natural drift. |
 | Expression | Only corrects notes already close to pitch. Scoops, slides and bends are left alone. |
 | Natural Vib | Makes the singer's own vibrato deeper or shallower (±12 dB). |
-| Formant / Throat | Keeps the voice's character when shifting, or makes it darker or brighter. |
+| Formant / Formant Shift | Formant keeps the voice's character when shifting. Formant Shift (±6 st) makes the voice deeper or brighter on purpose. |
 | Transpose | ±12 semitones. |
 | Vib Rate / Depth / Onset | Adds vibrato to held notes. |
 | Keyboard | Click a note to stop correcting to it (red X). |
@@ -76,7 +76,7 @@ part, and press it again), then turn **Retune Speed**:
   compensates on playback.
 - **LIVE** is for recording and performing through the plug-in. Latency is about 1.5 ms on high
   notes up to about 10 ms on a low male voice, and the current value is shown above the note
-  readout. Formant and Throat work in both modes.
+  readout. Formant and Formant Shift work in both modes.
 
 ![Live mode](docs/live.png)
 
@@ -128,13 +128,13 @@ so it can be tested on its own ([`tests/engine_test.cpp`](tests/engine_test.cpp)
   re-targeting on real note changes. On top of that sit Retune Speed smoothing, Humanize,
   Expression, Natural Vibrato rescaling, synthetic vibrato and Graph-mode edits.
 - **Studio mode:** TD-PSOLA. Grains always span one input period, which keeps the formants in
-  place; resampling the grains moves them (Throat).
+  place; resampling the grains moves them (Formant Shift).
 - **Live mode:**
   - A pitch-synchronous delay-line shifter that splices whole periods, with no look-ahead.
   - It predicts the current pitch across the analysis gap, and sizes its analysis window from
     the voice it is tracking.
   - Formants come from an LPC split: the flat residual is shifted, then the spectral envelope is
-    re-applied (Throat stretches it first).
+    re-applied (Formant Shift stretches it first).
 
 ## Contributing
 

@@ -90,6 +90,21 @@ int main (int argc, char** argv)
         std::printf ("state round trip: extent %d -> %d, %d edits, %d mismatches, %d bytes\n", proc.track.getExtent(),
                      copy.track.getExtent(), edits, mismatches, (int) state.getSize());
 
+        // A project saved by 1.0-1.2 with Throat Length 120 % must load as about -3.2 st.
+        {
+            auto old = proc.apvts.copyState();
+            old.removeChild (old.getChildWithProperty ("id", "formantShift"), nullptr);
+            juce::ValueTree throat ("PARAM");
+            throat.setProperty ("id", "throat", nullptr).setProperty ("value", 120.0, nullptr);
+            old.appendChild (throat, nullptr);
+            juce::MemoryBlock legacy;
+            proc.copyXmlToBinary (*old.createXml(), legacy);
+            FlayrTuneProcessor migrated;
+            migrated.setStateInformation (legacy.getData(), (int) legacy.getSize());
+            std::printf ("legacy throat 120%% -> formant shift %.2f st\n",
+                         migrated.apvts.getRawParameterValue ("formantShift")->load());
+        }
+
         // A hostile project: 50 MB of zeros gzipped into a few KB must be refused quickly.
         juce::MemoryOutputStream packed;
         {
