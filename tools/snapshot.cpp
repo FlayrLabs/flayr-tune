@@ -89,6 +89,25 @@ int main (int argc, char** argv)
         }
         std::printf ("state round trip: extent %d -> %d, %d edits, %d mismatches, %d bytes\n", proc.track.getExtent(),
                      copy.track.getExtent(), edits, mismatches, (int) state.getSize());
+
+        // A hostile project: 50 MB of zeros gzipped into a few KB must be refused quickly.
+        juce::MemoryOutputStream packed;
+        {
+            juce::GZIPCompressorOutputStream gz (packed, 9);
+            juce::HeapBlock<char> zeros (1 << 20, true);
+            for (int k = 0; k < 50; ++k)
+                gz.write (zeros, 1 << 20);
+        }
+        auto tree = proc.apvts.copyState();
+        juce::ValueTree bomb ("PitchTrack");
+        bomb.setProperty ("data", packed.getMemoryBlock().toBase64Encoding(), nullptr);
+        tree.appendChild (bomb, nullptr);
+        juce::MemoryBlock hostile;
+        proc.copyXmlToBinary (*tree.createXml(), hostile);
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        copy.setStateInformation (hostile.getData(), (int) hostile.getSize());
+        std::printf ("gzip bomb (%d KB packed, 50 MB inflated): rejected=%s in %.0f ms\n", (int) (packed.getDataSize() / 1024),
+                     copy.track.getExtent() == 0 ? "yes" : "NO", juce::Time::getMillisecondCounterHiRes() - t0);
     }
     static_cast<FlayrTuneEditor*> (ed.get())->refresh();
     auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 2.0f);

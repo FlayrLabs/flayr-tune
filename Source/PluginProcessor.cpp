@@ -247,16 +247,28 @@ void decodeTrack (tune::PitchTrack& t, const juce::String& data)
         return;
     juce::MemoryInputStream src (packed, false);
     juce::GZIPDecompressorInputStream gz (src);
+
+    // Project files can come from anyone, so never inflate more than a full track can hold
+    // (a small gzip "bomb" would otherwise expand until the host runs out of memory).
+    constexpr size_t maxBytes = 4 + (size_t) tune::PitchTrack::kCapacity * 9;
     juce::MemoryBlock rawBlock;
-    gz.readIntoMemoryBlock (rawBlock);
+    if (gz.readIntoMemoryBlock (rawBlock, (juce::pointer_sized_int) maxBytes + 1) > maxBytes)
+        return;
     juce::MemoryInputStream in (rawBlock, false);
     const int n = in.readInt();
     if (n <= 0 || n > tune::PitchTrack::kCapacity || (size_t) n * 9 + 4 > rawBlock.getSize())
         return;
-    for (int i = 0; i < n; ++i) t.setInput (i, in.readFloat());
+    // Only MIDI-range notes and known edit types get through.
+    auto note = [] (float v) { return std::isfinite (v) && v >= 0.0f && v <= 127.0f ? v : NAN; };
+    for (int i = 0; i < n; ++i) t.setInput (i, note (in.readFloat()));
     std::vector<float> targets ((size_t) n);
-    for (auto& v : targets) v = in.readFloat();
-    for (int i = 0; i < n; ++i) t.setTarget (i, targets[(size_t) i], (uint8_t) in.readByte());
+    for (auto& v : targets) v = note (in.readFloat());
+    for (int i = 0; i < n; ++i)
+    {
+        const auto mode = (uint8_t) in.readByte();
+        const bool known = mode == tune::PitchTrack::kExact || mode == tune::PitchTrack::kNote;
+        t.setTarget (i, known ? targets[(size_t) i] : NAN, known ? mode : (uint8_t) tune::PitchTrack::kNone);
+    }
 }
 } // namespace
 
