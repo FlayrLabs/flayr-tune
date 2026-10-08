@@ -56,7 +56,7 @@ private:
     double viewStart = 0.0, viewLength = 8.0;
     float viewLow = 48.0f, viewHigh = 72.0f;
 
-    bool dragging = false, userMovedPitchView = false;
+    bool dragging = false, userMovedPitchView = false, pitchViewPlaced = false;
     juce::Point<float> downPos, lastPos;
     std::vector<UndoEntry> undoStack;
 

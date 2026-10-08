@@ -113,7 +113,8 @@ void GraphEditor::refresh()
 {
     const double head = proc.playheadSeconds.load();
 
-    // Until the user scrolls the pitch axis, keep the visible singing centred.
+    // Until the user scrolls the pitch axis, keep the visible singing in view: place the
+    // view once, then move it only when the singing drifts well off centre (no jitter).
     if (! userMovedPitchView && ! dragging)
     {
         std::vector<float> seen;
@@ -125,9 +126,14 @@ void GraphEditor::refresh()
         if (! seen.empty())
         {
             std::nth_element (seen.begin(), seen.begin() + (long) seen.size() / 2, seen.end());
+            const float median = seen[seen.size() / 2];
             const float span = viewHigh - viewLow;
-            viewLow = std::round (seen[seen.size() / 2] - span * 0.5f);
-            viewHigh = viewLow + span;
+            if (! pitchViewPlaced || std::abs (median - (viewLow + span * 0.5f)) > span * 0.25f)
+            {
+                viewLow = std::round (median - span * 0.5f);
+                viewHigh = viewLow + span;
+                pitchViewPlaced = true;
+            }
         }
     }
     if (followBtn.getToggleState() && proc.hostPlaying.load() && ! dragging)

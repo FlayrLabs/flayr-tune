@@ -30,13 +30,15 @@ class PitchGraph : public juce::Component
 {
 public:
     void push (const tune::DisplayPoint& p);
+    void tick(); // once per GUI frame: eases the view toward its target range
     void setMask (uint16_t m) { mask = m; }
     void paint (juce::Graphics&) override;
 
 private:
     std::array<tune::DisplayPoint, 900> hist {};
     int head = 0;
-    float centre = 60.0f;
+    float centre = 60.0f, targetCentre = 60.0f;
+    bool hasCentre = false;
     uint16_t mask = 0x0FFF;
 };
 

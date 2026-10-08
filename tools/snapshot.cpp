@@ -35,7 +35,20 @@ int main (int argc, char** argv)
         proc.setPlayHead (&head);
     }
     proc.prepareToPlay (48000.0, 512);
-    std::unique_ptr<juce::AudioProcessorEditor> ed (proc.createEditor());
+    // "open": a low voice plays for 3 s with the window closed, then the window opens and
+    // frames are saved 0.1 / 0.25 / 0.5 s later, to check it doesn't jump around.
+    const bool openMode = mode == "open";
+    std::unique_ptr<juce::AudioProcessorEditor> ed (openMode ? nullptr : proc.createEditor());
+    const juce::String outPath (argc > 1 ? argv[1] : "snapshot.png");
+    auto save = [&] (const juce::String& path)
+    {
+        auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+        juce::File f (path);
+        f.deleteFile();
+        juce::FileOutputStream os (f);
+        juce::PNGImageFormat().writeImageToStream (img, os);
+    };
+    int openedAt = -1;
 
     // A melody sung slightly off pitch with vibrato and scoops.
     const double sr = 48000.0;
@@ -43,21 +56,33 @@ int main (int argc, char** argv)
     juce::AudioBuffer<float> buf (2, 512);
     juce::MidiBuffer midi;
     double phase = 0.0, t = 0.0;
-    for (int block = 0; block < (int) (sr * (graphMode ? 4.8 : 2.4) / 512); ++block)
+    const double seconds = openMode ? 3.6 : graphMode ? 4.8 : 2.4;
+    const double shift = openMode ? -15.0 : 0.0;
+    for (int block = 0; block < (int) (sr * seconds / 512); ++block)
     {
         for (int i = 0; i < 512; ++i, t += 1.0 / sr)
         {
             const int idx = (int) (t / 0.3) % 8;
             const double into = std::fmod (t, 0.3);
             const double scoop = into < 0.06 ? -0.8 * (1.0 - into / 0.06) : 0.0;
-            const double note = melody[idx] + 0.25 * std::sin (idx * 1.7) + scoop + 0.3 * std::sin (2 * juce::MathConstants<double>::pi * 5.5 * t);
+            const double note = shift + melody[idx] + 0.25 * std::sin (idx * 1.7) + scoop + 0.3 * std::sin (2 * juce::MathConstants<double>::pi * 5.5 * t);
             phase += 2 * juce::MathConstants<double>::pi * 440.0 * std::pow (2.0, (note - 69) / 12.0) / sr;
             float v = 0; for (int k = 1; k < 10; ++k) v += (float) (std::sin (k * phase) / k);
             buf.setSample (0, i, 0.2f * v); buf.setSample (1, i, 0.2f * v);
         }
         proc.processBlock (buf, midi);
         head.sample += 512;
-        if (block % 4 == 0) static_cast<FlayrTuneEditor*> (ed.get())->refresh();
+        if (openMode && ed == nullptr && t >= 3.0)
+        {
+            ed.reset (proc.createEditor());
+            openedAt = block;
+        }
+        if (ed != nullptr && block % 4 == 0)
+            static_cast<FlayrTuneEditor*> (ed.get())->refresh();
+        if (openMode && openedAt >= 0)
+            for (double after : { 0.1, 0.25, 0.5 })
+                if (block - openedAt == (int) (after * sr / 512))
+                    save (outPath.upToLastOccurrenceOf (".", false, false) + "_" + juce::String (after) + "s.png");
     }
     if (graphMode)
     {
@@ -124,6 +149,8 @@ int main (int argc, char** argv)
         std::printf ("gzip bomb (%d KB packed, 50 MB inflated): rejected=%s in %.0f ms\n", (int) (packed.getDataSize() / 1024),
                      copy.track.getExtent() == 0 ? "yes" : "NO", juce::Time::getMillisecondCounterHiRes() - t0);
     }
+    if (openMode)
+        return 0;
     static_cast<FlayrTuneEditor*> (ed.get())->refresh();
     auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 2.0f);
     juce::File out (argc > 1 ? argv[1] : "snapshot.png");

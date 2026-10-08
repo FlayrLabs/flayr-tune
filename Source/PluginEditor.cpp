@@ -83,8 +83,26 @@ void PitchGraph::push (const tune::DisplayPoint& p)
 {
     hist[(size_t) head] = p;
     head = (head + 1) % (int) hist.size();
-    if (p.voiced)
-        centre += 0.02f * (p.outNote - centre);
+    if (! p.voiced)
+        return;
+    // Jump straight to the singer's range on the first note, then only move the view
+    // when the voice leaves its middle, so the grid stays still while someone sings.
+    if (! hasCentre)
+    {
+        centre = targetCentre = std::round (p.outNote);
+        hasCentre = true;
+    }
+    else if (std::abs (p.outNote - targetCentre) > 5.0f)
+    {
+        targetCentre = std::round (p.outNote);
+    }
+}
+
+void PitchGraph::tick()
+{
+    centre += 0.2f * (targetCentre - centre);
+    if (std::abs (targetCentre - centre) < 0.01f)
+        centre = targetCentre;
 }
 
 void PitchGraph::paint (juce::Graphics& g)
@@ -94,7 +112,7 @@ void PitchGraph::paint (juce::Graphics& g)
     g.fillRoundedRectangle (b, 8.0f);
 
     const float span = 8.0f;
-    const float lo = std::round (centre) - span, hi = std::round (centre) + span;
+    const float lo = centre - span, hi = centre + span;
     const float plotX = b.getX() + 44.0f, plotW = b.getWidth() - 52.0f;
     auto yOf = [&] (float note) { return b.getBottom() - 8.0f - (note - lo) / (hi - lo) * (b.getHeight() - 16.0f); };
 
@@ -303,6 +321,10 @@ FlayrTuneEditor::FlayrTuneEditor (FlayrTuneProcessor& p)
     flex->slider.setTooltip ("Only correct notes that are already close to the target; leaves scoops and bends alone");
 
     setSize (1200, 640);
+    // Readings queued while the window was closed are stale; start from live data.
+    for (tune::DisplayPoint stale; proc.engine.popDisplay (stale);)
+    {
+    }
     startTimerHz (40);
 }
 
@@ -341,6 +363,7 @@ void FlayrTuneEditor::addCombo (juce::ComboBox& box, const juce::String& id,
 
 void FlayrTuneEditor::timerCallback()
 {
+    graph.tick();
     tune::DisplayPoint p;
     bool any = false;
     while (proc.engine.popDisplay (p))
