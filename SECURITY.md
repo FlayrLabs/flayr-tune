@@ -59,7 +59,7 @@ codesign -dv --verbose=2 "/Library/Audio/Plug-Ins/Components/Flayr Tune.componen
 
 You should see `Notarized Developer ID` and `Developer ID Application: Flayr Labs LLC (NRNU83UJ68)`.
 
-**Windows and Linux:** these files are built from the tagged source by GitHub Actions, in public, and carry a signed build provenance attestation. With the [GitHub CLI](https://cli.github.com):
+**Windows and Linux:** these files are built from the tagged source by GitHub Actions, in public. Releases after 1.3.0 also carry a signed build provenance attestation. With the [GitHub CLI](https://cli.github.com):
 
 ```sh
 gh attestation verify FlayrTune-*-Windows-Setup.exe --repo FlayrLabs/flayr-tune
