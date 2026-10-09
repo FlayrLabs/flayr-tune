@@ -140,6 +140,13 @@ so it can be tested on its own ([`tests/engine_test.cpp`](tests/engine_test.cpp)
 
 Bug reports, DAW compatibility notes and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Security
+
+Flayr Tune makes no network connections and collects no data. Every release includes
+`SHA256SUMS.txt`, the Mac build is signed and notarized, and the Windows and Linux builds carry
+GitHub build provenance. See [SECURITY.md](SECURITY.md) to verify a download or report a
+vulnerability privately.
+
 ## License
 
 Flayr Tune is licensed under the [GNU AGPLv3](LICENSE), because it is built on

@@ -58,4 +58,12 @@ echo "==> Done: $DMG"
 if [[ "${1:-}" == "--upload" ]]; then
     gh release upload "v$VERSION" "$DMG" --clobber --repo FlayrLabs/flayr-tune
     echo "==> Uploaded to release v$VERSION"
+
+    # Checksums for every file on the release, so users can verify their download.
+    sums_dir="$(mktemp -d)"
+    gh release download "v$VERSION" --repo FlayrLabs/flayr-tune --dir "$sums_dir" --pattern 'FlayrTune-*'
+    (cd "$sums_dir" && shasum -a 256 FlayrTune-* > SHA256SUMS.txt && cat SHA256SUMS.txt)
+    gh release upload "v$VERSION" "$sums_dir/SHA256SUMS.txt" --clobber --repo FlayrLabs/flayr-tune
+    rm -rf "$sums_dir"
+    echo "==> Uploaded SHA256SUMS.txt"
 fi

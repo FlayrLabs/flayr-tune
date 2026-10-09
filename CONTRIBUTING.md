@@ -4,6 +4,9 @@ Thanks for helping. A few notes so changes land smoothly.
 
 ## Reporting bugs
 
+For security problems, please report privately instead: see [SECURITY.md](SECURITY.md).
+
+
 Please include:
 - Your OS and DAW, with versions.
 - The plug-in format (AU, VST3 or LV2).

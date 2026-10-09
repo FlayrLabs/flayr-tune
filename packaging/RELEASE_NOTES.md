@@ -11,3 +11,5 @@
 **Linux:** extract and run `./install.sh`.
 
 Then restart your DAW or rescan plug-ins. Step-by-step guides for each DAW are in the [README](https://github.com/FlayrLabs/flayr-tune#install).
+
+To verify your download, compare it against `SHA256SUMS.txt` below. See [SECURITY.md](https://github.com/FlayrLabs/flayr-tune/blob/main/SECURITY.md) for signature and provenance checks.
