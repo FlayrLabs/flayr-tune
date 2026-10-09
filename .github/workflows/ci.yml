@@ -44,7 +44,7 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Upload plug-ins
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: FlayrTune-${{ runner.os }}
           path: |
