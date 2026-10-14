@@ -115,25 +115,37 @@ void FlayrTuneProcessor::prepareToPlay (double sampleRate, int)
 
 tune::Params FlayrTuneProcessor::readParams() const
 {
+    // A non-finite value (setStateInformation filters them, but a host could still
+    // inject one) falls back to the parameter's default from createLayout().
+    auto get = [] (const std::atomic<float>* v, float fallback)
+    {
+        const float x = v->load();
+        return std::isfinite (x) ? x : fallback;
+    };
+    auto choice = [&get] (const std::atomic<float>* v, int fallback, int count)
+    {
+        return juce::jlimit (0, count - 1, (int) get (v, (float) fallback));
+    };
+
     tune::Params p;
-    p.retuneMs = raw.retune->load();
-    p.humanize = raw.humanize->load() / 100.0f;
-    p.expression = raw.flex->load() / 100.0f;
-    p.naturalVibratoDb = raw.natvib->load();
-    p.key = (int) raw.key->load();
-    p.scale = (int) raw.scale->load();
-    p.inputType = (int) raw.inputType->load();
-    p.formantPreserve = raw.formant->load() > 0.5f;
+    p.retuneMs = get (raw.retune, 20.0f);
+    p.humanize = get (raw.humanize, 0.0f) / 100.0f;
+    p.expression = get (raw.flex, 0.0f) / 100.0f;
+    p.naturalVibratoDb = get (raw.natvib, 0.0f);
+    p.key = choice (raw.key, 0, (int) tune::kNoteNames.size());
+    p.scale = choice (raw.scale, 0, (int) tune::kScaleNames.size());
+    p.inputType = choice (raw.inputType, 1, 4);
+    p.formantPreserve = get (raw.formant, 1.0f) > 0.5f;
     // The engine models a vocal-tract length: +12 st of formant shift = half the length.
-    p.throat = std::pow (2.0f, -raw.formantShift->load() / 12.0f);
-    p.transpose = raw.transpose->load();
-    p.concertA = raw.concertA->load();
-    p.tracking = raw.tracking->load() / 100.0f;
-    p.vibRateHz = raw.vibRate->load();
-    p.vibDepthCents = raw.vibDepth->load();
-    p.vibDelayMs = raw.vibDelay->load();
-    p.mix = raw.mix->load() / 100.0f;
-    p.outputGain = juce::Decibels::decibelsToGain (raw.output->load());
+    p.throat = std::pow (2.0f, -get (raw.formantShift, 0.0f) / 12.0f);
+    p.transpose = get (raw.transpose, 0.0f);
+    p.concertA = get (raw.concertA, 440.0f);
+    p.tracking = get (raw.tracking, 50.0f) / 100.0f;
+    p.vibRateHz = get (raw.vibRate, 5.5f);
+    p.vibDepthCents = get (raw.vibDepth, 0.0f);
+    p.vibDelayMs = get (raw.vibDelay, 400.0f);
+    p.mix = get (raw.mix, 100.0f) / 100.0f;
+    p.outputGain = juce::Decibels::decibelsToGain (get (raw.output, 0.0f));
     p.midiTarget = raw.midiTarget->load() > 0.5f;
     p.liveMode = raw.live->load() > 0.5f;
     for (int pc = 0; pc < 12; ++pc)
@@ -222,6 +234,88 @@ namespace
 {
 const juce::Identifier kTrackTag ("PitchTrack");
 
+// Project files can come from anyone. JUCE's XML parser expands <!DOCTYPE>/<!ENTITY>
+// definitions and recurses once per nesting level, so a crafted blob can overflow the
+// stack (crashing the host) before we ever see the tree. Our own state is flat
+// (FlayrTune > PARAM / PitchTrack) and never contains "<!", so anything else is refused
+// before it reaches the parser.
+constexpr uint32_t kXmlMagic = 0x21324356;       // AudioProcessor::copyXmlToBinary header
+constexpr int kMaxStateBytes = 16 * 1024 * 1024; // a full 30-minute PitchTrack: ~3.1 MB, ~4.4 MB if incompressible
+constexpr int kMaxXmlDepth = 8;
+
+bool isSafeStateBlob (const void* data, int sizeInBytes)
+{
+    if (data == nullptr || sizeInBytes <= 9 || sizeInBytes > kMaxStateBytes)
+        return false;
+    const auto* bytes = static_cast<const uint8_t*> (data);
+    if (juce::ByteOrder::littleEndianInt (bytes) != kXmlMagic)
+        return false;
+    const auto length = (size_t) juce::ByteOrder::littleEndianInt (bytes + 4);
+    if (length == 0 || length > (size_t) sizeInBytes - 8)
+        return false;
+
+    const auto* text = reinterpret_cast<const char*> (bytes + 8);
+    int depth = 0;
+    for (size_t i = 0; i < length; ++i)
+    {
+        if (text[i] == 0)
+            return false;
+        if (text[i] != '<')
+            continue;
+        if (i + 1 >= length || text[i + 1] == '!') // DOCTYPE, ENTITY, comments, CDATA
+            return false;
+        if (text[i + 1] == '?') // the <?xml ...?> declaration
+        {
+            size_t j = i + 2;
+            while (j + 1 < length && ! (text[j] == '?' && text[j + 1] == '>'))
+                ++j;
+            if (j + 1 >= length)
+                return false;
+            i = j + 1;
+            continue;
+        }
+
+        // Walk to the end of the tag, skipping quoted attribute values.
+        char quote = 0;
+        size_t j = i + 1;
+        for (; j < length; ++j)
+        {
+            const char c = text[j];
+            if (c == 0)
+                return false;
+            if (quote != 0)
+                quote = c == quote ? 0 : quote;
+            else if (c == '"' || c == '\'')
+                quote = c;
+            else if (c == '>')
+                break;
+            else if (c == '<')
+                return false;
+        }
+        if (j >= length)
+            return false;
+
+        if (text[i + 1] == '/')
+        {
+            if (--depth < 0)
+                return false;
+        }
+        else if (text[j - 1] != '/' && ++depth > kMaxXmlDepth)
+        {
+            return false;
+        }
+        i = j;
+    }
+    return depth == 0;
+}
+
+// A finite number, or `fallback` for NaN, Inf and anything a float can't hold.
+double finiteOr (const juce::var& v, double fallback)
+{
+    const double d = (double) v;
+    return std::isfinite (d) && std::isfinite ((float) d) ? d : fallback;
+}
+
 // Captured pitch + edits up to the track's extent, gzipped, so they save with the project.
 juce::String encodeTrack (const tune::PitchTrack& t)
 {
@@ -289,6 +383,8 @@ void FlayrTuneProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void FlayrTuneProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
+    if (! isSafeStateBlob (data, sizeInBytes))
+        return;
     auto xml = getXmlFromBinary (data, sizeInBytes);
     if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
         return;
@@ -299,7 +395,7 @@ void FlayrTuneProcessor::setStateInformation (const void* data, int sizeInBytes)
     const auto oldThroat = tree.getChildWithProperty ("id", "throat");
     if (oldThroat.isValid() && ! tree.getChildWithProperty ("id", "formantShift").isValid())
     {
-        const double length = juce::jlimit (0.5, 2.0, (double) oldThroat.getProperty ("value", 100.0) / 100.0);
+        const double length = juce::jlimit (0.5, 2.0, finiteOr (oldThroat.getProperty ("value", 100.0), 100.0) / 100.0);
         juce::ValueTree shift ("PARAM");
         shift.setProperty ("id", "formantShift", nullptr);
         shift.setProperty ("value", juce::jlimit (-6.0, 6.0, -12.0 * std::log2 (length)), nullptr);
@@ -312,6 +408,16 @@ void FlayrTuneProcessor::setStateInformation (const void* data, int sizeInBytes)
     else
         track.clearAll();
     tree.removeChild (trackTree, nullptr);
+
+    // "nan" or "inf" survive jlimit and would stick in the engine, so they become defaults.
+    for (auto* param : getParameters())
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
+        {
+            auto child = tree.getChildWithProperty ("id", ranged->paramID);
+            const double fallback = ranged->convertFrom0to1 (ranged->getDefaultValue());
+            if (child.isValid() && child.hasProperty ("value"))
+                child.setProperty ("value", finiteOr (child.getProperty ("value"), fallback), nullptr);
+        }
     apvts.replaceState (tree);
 
     // replaceState skips parameters whose stored value didn't change, which can leave
