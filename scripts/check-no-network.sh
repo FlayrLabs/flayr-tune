@@ -62,9 +62,12 @@ check_names() {
     [[ -z "$hits" ]] || report "networking names inside the binary: $(echo $hits)"
     hits="$(LC_ALL=C grep -aoE "(^|[^A-Za-z0-9_])(curl|wget|NSTask)([^A-Za-z0-9_]|$)" "$1" | tr -cd 'A-Za-z\n' | sort -u || true)"
     [[ -z "$hits" ]] || report "names of download tools or process launchers: $(echo $hits)"
-    # URLs: only XML namespaces and the project's own page (VST3/LV2 metadata) may appear.
+    # URLs: only identifiers that are never fetched may appear: XML and RDF/LV2 vocabulary
+    # namespaces, JUCE's LV2 extension URI, file:// (local paths) and the project's own
+    # page (VST3/LV2 metadata).
     hits="$(LC_ALL=C grep -aoE "(https?|ftps?|wss?|file|smb|afp|nfs|ssh|sftp|scp|telnet|ldaps?|rtsps?|rtmp|mms|git|svn|gopher|irc|xmpp|sip|stun|turn)://[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]*" "$1" \
-            | grep -vE '^http://www\.w3\.org/|^https://github\.com/FlayrLabs/' | sort -u || true)"
+            | grep -vE '^http://www\.w3\.org/|^https://github\.com/FlayrLabs/|^file://|^http://lv2plug\.in/ns/|^http://usefulinc\.com/ns/doap|^http://xmlns\.com/foaf/|^https://lv2-extensions\.juce\.com/' \
+            | sort -u || true)"
     [[ -z "$hits" ]] || report "URLs inside the binary: $(echo $hits)"
     hits="$(perl -0777 -ne 'while (/\x00_?('"$DYNAMIC_NAMES"')\x00/g) { print "$1\n" }' "$1" | sort -u)" \
         || die "perl failed on $1"

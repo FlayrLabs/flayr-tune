@@ -93,7 +93,10 @@ if(APPLE)
 elseif(MSVC)
     target_link_options(FlayrTune INTERFACE $<$<CONFIG:Release>:/OPT:REF /OPT:ICF>)
 elseif(UNIX)
-    target_link_options(FlayrTune INTERFACE -Wl,--as-needed)
+    # Per-function sections so the linker can drop JUCE code nothing calls (on Linux that
+    # includes ChildProcess's fork/execvp, which check-no-network.sh refuses).
+    target_compile_options(FlayrTune PUBLIC -ffunction-sections -fdata-sections)
+    target_link_options(FlayrTune INTERFACE -Wl,--as-needed -Wl,--gc-sections)
 endif()
 
 target_sources(FlayrTune PRIVATE
