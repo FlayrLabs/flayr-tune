@@ -26,8 +26,11 @@ static bool readWav (const std::string& path, std::vector<float>& x, double& sr)
     {
         if (std::memcmp (id, "fmt ", 4) == 0)
         {
-            std::vector<char> b (size);
-            f.read (b.data(), size);
+            if (size < 16 || size > 4096) // PCM/float fmt is 16..40 bytes; anything else is broken
+                return false;
+            std::vector<char> b (size + (size & 1));
+            if (! f.read (b.data(), (std::streamsize) b.size()))
+                return false;
             std::memcpy (&fmt, b.data(), 2);
             std::memcpy (&chans, b.data() + 2, 2);
             std::memcpy (&rate, b.data() + 4, 4);
@@ -35,12 +38,13 @@ static bool readWav (const std::string& path, std::vector<float>& x, double& sr)
         }
         else if (std::memcmp (id, "data", 4) == 0)
         {
-            if (bits != 32 || chans != 1)
+            if (bits != 32 || chans != 1 || ! Engine::isSupportedRate (rate))
                 return false;
             x.resize (size / 4);
-            f.read ((char*) x.data(), size);
+            f.read ((char*) x.data(), (std::streamsize) (x.size() * 4));
+            x.resize ((size_t) f.gcount() / 4); // a truncated file keeps what was there
             sr = rate;
-            return true;
+            return ! x.empty();
         }
         else
         {
