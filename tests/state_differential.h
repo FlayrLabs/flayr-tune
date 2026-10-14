@@ -74,7 +74,7 @@ inline std::string limitsViolated (const Parsed& p)
         return {};
     if (p.elements > FlayrTuneProcessor::kMaxXmlTags)
         return "elements " + std::to_string (p.elements);
-    if (p.maxDepth > FlayrTuneProcessor::kMaxXmlTags)
+    if (p.maxDepth > 64) // patches/juce-xml-depth-limit.patch
         return "depth " + std::to_string (p.maxDepth);
     if (p.attributes > FlayrTuneProcessor::kMaxXmlAttributes)
         return "attributes " + std::to_string (p.attributes);

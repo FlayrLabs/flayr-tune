@@ -15,7 +15,7 @@ option(FLAYR_TUNE_BUILD_FUZZERS "Build the ASan/UBSan fuzz targets (development 
 
 include(FetchContent)
 set(FLAYR_JUCE_PATCHES)
-foreach(name no-network xml-entity-overread double-exponent-overflow vst3-private-state wrapper-state-checks
+foreach(name no-network xml-entity-overread xml-depth-limit double-exponent-overflow vst3-private-state wrapper-state-checks
              base64-declared-size)
     list(APPEND FLAYR_JUCE_PATCHES ${CMAKE_CURRENT_SOURCE_DIR}/patches/juce-${name}.patch)
 endforeach()
@@ -35,6 +35,7 @@ FetchContent_Declare(JUCE
     #  no-network: compiles juce_core's HTTP, socket and interface-enumeration code out
     #    when FLAYR_NO_NETWORK=1. Tune never uses the network.
     #  xml-entity-overread: a heap over-read in the XML parser.
+    #  xml-depth-limit: the XML parser fails beyond 64 nesting levels instead of recursing on.
     #  double-exponent-overflow: an int overflow parsing numbers like 1e99999999999.
     #  vst3-private-state: the VST3 wrapper's own state trailer (wild read, stack overflow).
     #  wrapper-state-checks: unchecked types and sizes in the AU and LV2 state paths.

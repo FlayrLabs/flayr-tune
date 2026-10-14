@@ -272,6 +272,14 @@ int main()
         std::printf ("  slowest of these: %.0f ms\n", worst);
         check (worst < 2000.0, "every one finishes within 2 s");
 
+        // patches/juce-xml-depth-limit.patch: JUCE's parser itself refuses deep nesting.
+        {
+            auto nested = [] (int levels) { return juce::String (repeated ("<a>", levels) + repeated ("</a>", levels)); };
+            check (juce::parseXML (nested (64)) != nullptr, "JUCE parses 64 nested levels");
+            check (juce::parseXML (nested (65)) == nullptr && juce::parseXML (nested (100000)) == nullptr,
+                   "and refuses 65 or 100,000 (no recursion past the limit)");
+        }
+
         // The JUCE fix itself, for every caller (ValueTree::fromXml, the LV2 wrapper, ...).
         {
             juce::MemoryBlock m;
