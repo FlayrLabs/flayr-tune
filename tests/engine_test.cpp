@@ -152,6 +152,9 @@ static double stddev (const std::vector<double>& v)
     return std::sqrt (s / (double) v.size());
 }
 
+// Engine is ~38 KB. As dozens of locals in main() it overflowed MSVC's 1 MB default
+// stack before the first line ran (the Windows "SegFault" in 0.01 s), so every test
+// engine lives on the heap, as it does inside the plug-in.
 static Engine& fresh (Engine& e, const Params& p, double sr = 48000.0)
 {
     e.prepare (sr, 1);
@@ -168,7 +171,7 @@ int main()
 
     {
         std::puts ("Latency");
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         fresh (e, {});
         std::printf ("  latency = %d samples (%.1f ms @48k)\n", e.getLatencySamples(), 1000.0 * e.getLatencySamples() / sr);
         check (e.getLatencySamples() < 0.07 * sr, "latency under 70 ms");
@@ -177,7 +180,7 @@ int main()
     {
         std::puts ("In-tune input passes through unchanged");
         Params p; p.retuneMs = 0;
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         auto x = voice (sr, 2.0, [&] (double) { return a3; });
         auto y = run (fresh (e, p), x);
         // PSOLA may sit a whole period away from the nominal delay; align on the best lag.
@@ -200,7 +203,7 @@ int main()
     {
         std::puts ("Hard tune: 35 cents sharp -> A3");
         Params p; p.retuneMs = 0;
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         auto y = run (fresh (e, p), voice (sr, 2.0, [&] (double) { return a3 * cents (35); }));
         const double m = median (centsTrack (y, sr, a3, 0.5));
         std::printf ("  output median = %+.1f cents\n", m);
@@ -210,7 +213,7 @@ int main()
     {
         std::puts ("Scale snap: C major, input 190 Hz -> G3 (196 Hz)");
         Params p; p.retuneMs = 0; p.key = 0; p.scale = 1;
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         auto y = run (fresh (e, p), voice (sr, 2.0, [] (double) { return 190.0; }));
         const double m = median (centsTrack (y, sr, 196.0, 0.5));
         std::printf ("  output median vs G3 = %+.1f cents\n", m);
@@ -220,7 +223,7 @@ int main()
     {
         std::puts ("Removed note: C major minus G, input 190 Hz -> F3 (174.6 Hz)");
         Params p; p.retuneMs = 0; p.key = 0; p.scale = 1; p.removedMask = 1u << 7;
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         auto y = run (fresh (e, p), voice (sr, 2.0, [] (double) { return 190.0; }));
         const double m = median (centsTrack (y, sr, 174.614, 0.5));
         std::printf ("  output median vs F3 = %+.1f cents\n", m);
@@ -230,7 +233,7 @@ int main()
     {
         std::puts ("MIDI target: only E held, input A3 -> E3");
         Params p; p.retuneMs = 0; p.midiTarget = true;
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         fresh (e, p).setMidiMask (1u << 4);
         auto y = run (e, voice (sr, 2.0, [&] (double) { return a3; }));
         const double m = median (centsTrack (y, sr, 164.814, 0.5));
@@ -241,7 +244,7 @@ int main()
     {
         std::puts ("Transpose +12 with formant preservation");
         Params p; p.retuneMs = 0; p.transpose = 12;
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         auto y = run (fresh (e, p), voice (sr, 2.0, [&] (double) { return a3; }));
         const double m = median (centsTrack (y, sr, 440.0, 0.5));
         std::printf ("  output median vs A4 = %+.1f cents\n", m);
@@ -251,7 +254,7 @@ int main()
     {
         std::puts ("Transpose -7 (fifth down)");
         Params p; p.retuneMs = 0; p.transpose = -7;
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         auto y = run (fresh (e, p), voice (sr, 2.0, [&] (double) { return a3; }));
         const double m = median (centsTrack (y, sr, 146.832, 0.5));
         std::printf ("  output median vs D3 = %+.1f cents\n", m);
@@ -261,13 +264,14 @@ int main()
     const auto vibrato = [&] (double t) { return a3 * cents (40.0 * std::sin (2 * kPi * 5.5 * t)); };
     double vibIn = 0;
     {
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         Params p; p.scale = 0; p.retuneMs = 400; p.mix = 0; // dry reference
         vibIn = stddev (centsTrack (run (fresh (e, p), voice (sr, 3.0, vibrato)), sr, a3, 0.5));
     }
     {
         std::puts ("Retune speed vs vibrato (input vibrato +/-40 cents)");
-        Engine e1, e2;
+        auto e1Heap = std::make_unique<Engine>(); auto& e1 = *e1Heap;
+        auto e2Heap = std::make_unique<Engine>(); auto& e2 = *e2Heap;
         Params fast; fast.retuneMs = 0;
         Params slow; slow.retuneMs = 300;
         const double sFast = stddev (centsTrack (run (fresh (e1, fast), voice (sr, 3.0, vibrato)), sr, a3, 0.5));
@@ -279,7 +283,8 @@ int main()
 
     {
         std::puts ("Natural Vibrato +6 dB / -12 dB at slow retune");
-        Engine e1, e2;
+        auto e1Heap = std::make_unique<Engine>(); auto& e1 = *e1Heap;
+        auto e2Heap = std::make_unique<Engine>(); auto& e2 = *e2Heap;
         Params up; up.retuneMs = 300; up.naturalVibratoDb = 6;
         Params dn; dn.retuneMs = 300; dn.naturalVibratoDb = -12;
         const double sUp = stddev (centsTrack (run (fresh (e1, up), voice (sr, 3.0, vibrato)), sr, a3, 0.5));
@@ -291,7 +296,8 @@ int main()
 
     {
         std::puts ("Expression 100%: 40 cents off is left alone, 3 cents off is pulled in");
-        Engine e1, e2;
+        auto e1Heap = std::make_unique<Engine>(); auto& e1 = *e1Heap;
+        auto e2Heap = std::make_unique<Engine>(); auto& e2 = *e2Heap;
         Params p; p.retuneMs = 0; p.expression = 1.0f;
         const double far = median (centsTrack (run (fresh (e1, p), voice (sr, 2.0, [&] (double) { return a3 * cents (40); })), sr, a3, 0.5));
         const double near = median (centsTrack (run (fresh (e2, p), voice (sr, 2.0, [&] (double) { return a3 * cents (3); })), sr, a3, 0.5));
@@ -304,7 +310,8 @@ int main()
         std::puts ("Humanize: sustained note settles slower than a short one");
         // Input jumps from 30 cents sharp A3 to 30 cents sharp B3 at 1.0 s and stays.
         auto curve = [&] (double t) { return (t < 1.0 ? a3 : 246.942) * cents (30); };
-        Engine e1, e2;
+        auto e1Heap = std::make_unique<Engine>(); auto& e1 = *e1Heap;
+        auto e2Heap = std::make_unique<Engine>(); auto& e2 = *e2Heap;
         Params p0; p0.retuneMs = 20; p0.humanize = 0;
         Params p1 = p0; p1.humanize = 1;
         auto t0 = centsTrack (run (fresh (e1, p0), voice (sr, 3.0, curve)), sr, 246.942, 2.0);
@@ -316,7 +323,7 @@ int main()
 
     {
         std::puts ("Stability: silence, noise, sweep");
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         fresh (e, {});
         std::vector<float> x ((size_t) sr * 2, 0.0f);
         uint32_t seed = 1;
@@ -338,7 +345,7 @@ int main()
         std::puts ("Sample rates 44.1k / 96k hard tune");
         for (double rate : { 44100.0, 96000.0 })
         {
-            Engine e;
+            auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
             Params p; p.retuneMs = 0;
             auto y = run (fresh (e, p, rate), voice (rate, 2.0, [&] (double) { return a3 * cents (-30); }));
             const double m = median (centsTrack (y, rate, a3, 0.5));
@@ -352,7 +359,7 @@ int main()
         for (double f0 : { 110.0, 220.0, 440.0 })
         {
             Params p; p.retuneMs = 0; p.liveMode = true;
-            Engine e;
+            auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
             auto x = voice (sr, 2.0, [&] (double) { return f0; });
             auto y = run (fresh (e, p), x);
             double bestSnr = -1e9;
@@ -379,7 +386,7 @@ int main()
         auto liveRun = [&] (Params p, std::function<double (double)> f0, double ref, double from = 0.5)
         {
             p.liveMode = true;
-            Engine e;
+            auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
             return centsTrack (run (fresh (e, p), voice (sr, 2.5, f0)), sr, ref, from);
         };
         Params hard; hard.retuneMs = 0;
@@ -401,7 +408,7 @@ int main()
 
     {
         std::puts ("LIVE <-> STUDIO switching mid-stream stays stable");
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         Params p; p.retuneMs = 10;
         fresh (e, p);
         auto x = voice (sr, 4.0, vibrato);
@@ -422,7 +429,7 @@ int main()
         std::puts ("Learn Key");
         auto learn = [&] (std::vector<int> melody, int& key, bool& minor)
         {
-            Engine e;
+            auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
             Params p; p.retuneMs = 0;
             fresh (e, p).beginKeyLearn();
             auto f = [&] (double t) { return 440.0 * std::pow (2.0, (melody[(size_t) (t / 0.25) % melody.size()] - 69) / 12.0); };
@@ -449,7 +456,7 @@ int main()
         auto shifted = [&] (bool live, bool formant, float throat, float transpose)
         {
             Params p; p.retuneMs = 0; p.liveMode = live; p.formantPreserve = formant; p.throat = throat; p.transpose = transpose;
-            Engine e;
+            auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
             return run (fresh (e, p), x);
         };
         const auto liveOn = shifted (true, true, 1.0f, 5);
@@ -472,7 +479,8 @@ int main()
         const auto x = vowel (sr, 2.5, [] (double) { return 293.665; }); // D4, in tune
         const double c0 = centroid (x, sr, 0.5);
         Params p; p.retuneMs = 0; p.liveMode = true; p.transpose = 5;
-        Engine e1, e2;
+        auto e1Heap = std::make_unique<Engine>(); auto& e1 = *e1Heap;
+        auto e2Heap = std::make_unique<Engine>(); auto& e2 = *e2Heap;
         const double rOn = centroid (run (fresh (e1, p), x), sr, 0.5) / c0;
         p.formantPreserve = false;
         const double rOff = centroid (run (fresh (e2, p), x), sr, 0.5) / c0;
@@ -483,7 +491,7 @@ int main()
     {
         std::puts ("Formants: live with formant on is clean when already in tune");
         Params p; p.retuneMs = 0; p.liveMode = true; p.formantPreserve = true;
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         auto x = vowel (sr, 2.0, [] (double) { return 220.0; });
         auto y = run (fresh (e, p), x);
         double bestSnr = -1e9;
@@ -504,7 +512,7 @@ int main()
     {
         std::puts ("Graph: capture lines up with the host timeline");
         auto track = std::make_unique<PitchTrack>();
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         Params p; p.retuneMs = 0;
         fresh (e, p).setTrack (track.get());
         runPlaying (e, voice (sr, 2.0, [&] (double t) { return t < 1.0 ? a3 : 261.626; }), true, false);
@@ -525,7 +533,7 @@ int main()
         auto track = std::make_unique<PitchTrack>();
         for (int i = PitchTrack::indexFor (0.8); i < PitchTrack::indexFor (1.6); ++i)
             track->setTarget (i, 62.0f, PitchTrack::kExact);
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         Params p; p.retuneMs = 0; p.liveMode = live;
         fresh (e, p).setTrack (track.get());
         auto y = runPlaying (e, voice (sr, 2.2, [&] (double) { return a3; }), false, true);
@@ -542,7 +550,7 @@ int main()
         auto track = std::make_unique<PitchTrack>();
         for (int i = PitchTrack::indexFor (0.3); i < PitchTrack::indexFor (3.0); ++i)
             track->setTarget (i, 60.0f, PitchTrack::kNote);
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         Params p; p.retuneMs = 0;
         fresh (e, p).setTrack (track.get());
         auto y = runPlaying (e, voice (sr, 3.0, vibrato), false, true);
@@ -569,7 +577,7 @@ int main()
         check (nextPow2 (std::numeric_limits<int>::max()) == (1 << 30), "nextPow2 saturates instead of overflowing");
         for (double rate : { 0.0, -1.0, -48000.0, (double) NAN, (double) INFINITY, 6000.0, 7559.0, 1e9, 6.4e10 })
         {
-            Engine e;
+            auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
             e.prepare (rate, 1);
             auto x = voice (sr, 0.25, [&] (double) { return a3; });
             auto y = run (e, x);
@@ -578,7 +586,7 @@ int main()
             check (! e.isPrepared() && e.getLatencySamples() == 0 && finite && peak == 0.0f,
                    "rate " + std::to_string (rate) + " -> unprepared, silent");
         }
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         e.prepare (48000.0, 1);
         e.prepare (0.0, 1); // a bad re-prepare must not leave stale buffers in use
         auto y = run (e, voice (sr, 0.25, [&] (double) { return a3; }));
@@ -593,7 +601,7 @@ int main()
 
     {
         std::puts ("process() before prepare()");
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         auto y = run (e, voice (sr, 0.1, [&] (double) { return a3; }));
         bool finite; float peak;
         stats (y, 0, y.size(), finite, peak);
@@ -604,7 +612,7 @@ int main()
         std::puts ("Lowest supported rate (8 kHz), Studio and Live");
         for (bool live : { false, true })
         {
-            Engine e;
+            auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
             Params p; p.liveMode = live;
             fresh (e, p, 8000.0).reset();
             auto y = run (e, voice (8000.0, 2.0, [&] (double t) { return 70.0 + 300.0 * t; }));
@@ -619,7 +627,7 @@ int main()
         std::puts ("Non-finite parameters fall back to defaults");
         auto tryParams = [&] (Params p, const std::string& label)
         {
-            Engine e;
+            auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
             fresh (e, p).reset();
             auto y = run (e, voice (sr, 2.0, [&] (double) { return a3 * cents (30); }));
             bool finite; float peak;
@@ -641,7 +649,7 @@ int main()
         for (bool live : { false, true })
             for (float bad : { NAN, INFINITY })
             {
-                Engine e;
+                auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
                 Params p; p.liveMode = live;
                 fresh (e, p).reset();
                 auto x = voice (sr, 3.0, [&] (double) { return a3; });
@@ -659,7 +667,7 @@ int main()
 
     {
         std::puts ("Output is hard-limited");
-        Engine e;
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         Params p; p.outputGain = 1000.0f;
         fresh (e, p);
         auto y = run (e, voice (sr, 1.0, [&] (double) { return a3; }));
