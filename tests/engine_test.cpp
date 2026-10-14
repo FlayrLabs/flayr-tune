@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <string>
 
 using namespace tune;
@@ -548,6 +549,122 @@ int main()
         std::printf ("  centre %+.1f c vs C4, vibrato stddev %.1f (input %.1f)\n", median (c), stddev (c), vibIn);
         check (std::abs (median (c)) < 8, "moved to the drawn note");
         check (stddev (c) > 0.6 * vibIn, "vibrato kept");
+    }
+
+    // Robustness: hosts and project files are not trusted to stay in range.
+    auto stats = [] (const std::vector<float>& y, size_t from, size_t to, bool& finite, float& peak)
+    {
+        finite = true; peak = 0.0f;
+        for (size_t i = from; i < std::min (to, y.size()); ++i)
+        {
+            finite &= std::isfinite (y[i]);
+            if (std::isfinite (y[i])) peak = std::max (peak, std::abs (y[i]));
+        }
+    };
+
+    {
+        std::puts ("Unsupported sample rates: silence, no hang, no allocation");
+        check (nextPow2 (0) == 1 && nextPow2 (1000) == 1024, "nextPow2 basics");
+        check (nextPow2 (std::numeric_limits<int>::max()) == (1 << 30), "nextPow2 saturates instead of overflowing");
+        for (double rate : { 0.0, -1.0, -48000.0, (double) NAN, (double) INFINITY, 6000.0, 7559.0, 1e9, 6.4e10 })
+        {
+            Engine e;
+            e.prepare (rate, 1);
+            auto x = voice (sr, 0.25, [&] (double) { return a3; });
+            auto y = run (e, x);
+            bool finite; float peak;
+            stats (y, 0, y.size(), finite, peak);
+            check (! e.isPrepared() && e.getLatencySamples() == 0 && finite && peak == 0.0f,
+                   "rate " + std::to_string (rate) + " -> unprepared, silent");
+        }
+        Engine e;
+        e.prepare (48000.0, 1);
+        e.prepare (0.0, 1); // a bad re-prepare must not leave stale buffers in use
+        auto y = run (e, voice (sr, 0.25, [&] (double) { return a3; }));
+        bool finite; float peak;
+        stats (y, 0, y.size(), finite, peak);
+        check (finite && peak == 0.0f, "bad re-prepare -> silent");
+        e.prepare (48000.0, 1);
+        y = run (e, voice (sr, 1.0, [&] (double) { return a3; }));
+        stats (y, y.size() / 2, y.size(), finite, peak);
+        check (e.isPrepared() && finite && peak > 0.1f, "recovers after a valid prepare");
+    }
+
+    {
+        std::puts ("process() before prepare()");
+        Engine e;
+        auto y = run (e, voice (sr, 0.1, [&] (double) { return a3; }));
+        bool finite; float peak;
+        stats (y, 0, y.size(), finite, peak);
+        check (finite && peak == 0.0f, "silent, no out-of-bounds write");
+    }
+
+    {
+        std::puts ("Lowest supported rate (8 kHz), Studio and Live");
+        for (bool live : { false, true })
+        {
+            Engine e;
+            Params p; p.liveMode = live;
+            fresh (e, p, 8000.0).reset();
+            auto y = run (e, voice (8000.0, 2.0, [&] (double t) { return 70.0 + 300.0 * t; }));
+            bool finite; float peak;
+            stats (y, 0, y.size(), finite, peak);
+            check (e.isPrepared() && finite && peak > 0.05f && peak < 2.0f,
+                   std::string (live ? "live" : "studio") + " at 8 kHz runs clean");
+        }
+    }
+
+    {
+        std::puts ("Non-finite parameters fall back to defaults");
+        auto tryParams = [&] (Params p, const std::string& label)
+        {
+            Engine e;
+            fresh (e, p).reset();
+            auto y = run (e, voice (sr, 2.0, [&] (double) { return a3 * cents (30); }));
+            bool finite; float peak;
+            stats (y, y.size() / 2, y.size(), finite, peak);
+            check (finite && peak > 0.05f && peak < 2.0f, label);
+        };
+        Params p;
+        p.mix = NAN; tryParams (p, "mix = NaN");
+        p = {}; p.retuneMs = NAN; tryParams (p, "retune = NaN (studio)");
+        p = {}; p.retuneMs = NAN; p.liveMode = true; tryParams (p, "retune = NaN (live)");
+        p = {}; p.throat = NAN; p.liveMode = true; tryParams (p, "throat = NaN (live)");
+        p = {}; p.vibDepthCents = 50; p.vibRateHz = NAN; tryParams (p, "vibrato rate = NaN");
+        p = {}; p.outputGain = INFINITY; tryParams (p, "output gain = Inf");
+        p = {}; p.key = 1 << 30; p.scale = -5; p.inputType = 99; tryParams (p, "out-of-range key / scale / input type");
+    }
+
+    {
+        std::puts ("NaN / Inf input samples never reach the output");
+        for (bool live : { false, true })
+            for (float bad : { NAN, INFINITY })
+            {
+                Engine e;
+                Params p; p.liveMode = live;
+                fresh (e, p).reset();
+                auto x = voice (sr, 3.0, [&] (double) { return a3; });
+                x[(size_t) sr + 7] = bad;
+                auto y = run (e, x, 512);
+                bool finite; float peak;
+                stats (y, 0, y.size(), finite, peak);
+                float late;
+                bool lateFinite;
+                stats (y, (size_t) (2 * sr), y.size(), lateFinite, late);
+                check (finite && late > 0.1f, std::string (live ? "live" : "studio") + (std::isnan (bad) ? " NaN" : " Inf")
+                                                  + " input: finite output, audio recovers");
+            }
+    }
+
+    {
+        std::puts ("Output is hard-limited");
+        Engine e;
+        Params p; p.outputGain = 1000.0f;
+        fresh (e, p);
+        auto y = run (e, voice (sr, 1.0, [&] (double) { return a3; }));
+        bool finite; float peak;
+        stats (y, 0, y.size(), finite, peak);
+        check (finite && peak <= Engine::kOutputLimit, "peak <= " + std::to_string (Engine::kOutputLimit));
     }
 
     std::printf ("\n%s (%d failures)\n", failures == 0 ? "ALL PASSED" : "FAILURES", failures);
