@@ -69,14 +69,23 @@ The Windows installer isn't Authenticode-signed yet, so Windows SmartScreen may 
 
 ## Checking for networking code
 
-Releases after 1.3.0 contain no networking code, and CI fails any build whose plug-in imports a
-networking API ([`scripts/check-no-network.sh`](scripts/check-no-network.sh)). You can check an
-installed plug-in yourself with your platform's own tools; each command should print nothing:
+Releases after 1.3.0 contain no networking code, and CI and both release builds fail if the
+plug-in imports a networking API or contains the name of one
+([`scripts/check-no-network.sh`](scripts/check-no-network.sh)). That check is a tripwire, not a
+proof: it looks at imports and at the names a run-time lookup would need, so code that assembled
+those names at run time or made system calls directly would get past it. The real guarantee is
+the source: the networking code is compiled out (see the patch above), which you can read and
+build yourself.
+
+You can check an installed plug-in with your platform's own tools; each command should print
+nothing:
 
 ```sh
 # macOS (repeat with -arch x86_64 on Intel)
 nm -u -arch arm64 "/Library/Audio/Plug-Ins/VST3/Flayr Tune.vst3/Contents/MacOS/Flayr Tune" \
-  | grep -E '^_(socket|connect|bind|listen|accept|getaddrinfo|send|sendto|recv|recvfrom)$|NSURLSession|CFNetwork'
+  | grep -E '^_(socket|connect|bind|listen|accept|getaddrinfo|send|sendto|recv|recvfrom)(\$|$)|NSURLSession|CFNetwork'
+grep -aoE 'NSURLSession|NSURLConnection|CFNetwork|getaddrinfo|dataWithContentsOfURL' \
+  "/Library/Audio/Plug-Ins/VST3/Flayr Tune.vst3/Contents/MacOS/Flayr Tune"
 
 # Linux
 nm -D --undefined-only ~/.vst3/"Flayr Tune.vst3"/Contents/x86_64-linux/"Flayr Tune.so" \

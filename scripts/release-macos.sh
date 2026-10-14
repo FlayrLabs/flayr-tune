@@ -11,8 +11,19 @@
 # Only signs a tagged release: the checkout must be clean, HEAD must sit exactly on a
 # v<version> tag that matches CMakeLists.txt and the tag on GitHub, and the build runs
 # in a fresh clone of that tag with tests, tools and git hooks off. Nothing from the
-# working tree (local edits, untracked files, build dirs) reaches the signed bundle.
+# working tree (local edits, untracked files, build dirs) reaches the signed bundle,
+# and nothing from the environment either: configure and build run under env -i with a
+# minimal PATH, and the script refuses to start if CMake/FetchContent/compiler overrides
+# are set (CXXFLAGS=-UFLAYR_NO_NETWORK or FETCHCONTENT_SOURCE_DIR_JUCE=<unpatched JUCE>
+# would otherwise reach the signed build). The result is checked for networking code and
+# for every JUCE patch before anything is signed.
 set -euo pipefail
+
+# No git hooks, fsmonitor or other config-driven commands for any git run below, and
+# FetchContent's git runs inherit the same (env -i keeps these variables, see BUILD_ENV).
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
+export GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false
 
 IDENTITY="${IDENTITY:-Developer ID Application: Flayr Labs LLC (NRNU83UJ68)}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-flayr-notary}"
@@ -24,6 +35,9 @@ DIST="$ROOT/dist"
 DMG="$DIST/FlayrTune-$VERSION-macOS.dmg"
 
 die() { echo "error: $*" >&2; exit 1; }
+
+overrides="$(env | grep -E '^(FETCHCONTENT_|CMAKE_|CTEST_|CXXFLAGS|CFLAGS|CPPFLAGS|LDFLAGS|OBJCFLAGS|OBJCXXFLAGS|CC|CXX|OBJC|OBJCXX|SDKROOT|MACOSX_DEPLOYMENT_TARGET|LIBRARY_PATH|CPATH|C_INCLUDE_PATH|CPLUS_INCLUDE_PATH|DYLD_)[A-Z_]*=' | cut -d= -f1 || true)"
+[[ -z "$overrides" ]] || die "build overrides are set in the environment, unset them first: $(echo $overrides)"
 
 [[ -n "$VERSION" ]] || die "could not read the version from CMakeLists.txt"
 [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || die "the working tree has uncommitted or untracked changes"
@@ -45,12 +59,21 @@ git -c core.hooksPath=/dev/null clone --quiet --depth 1 --branch "$TAG" --no-rec
 [[ "$(git -C "$SRC" rev-parse HEAD)" == "$TAG_SHA" ]] || die "the clean clone is not at $TAG"
 
 echo "==> Building Flayr Tune $VERSION (universal)"
-cmake -S "$SRC" -B "$BUILD" -G Xcode \
+CMAKE="$(command -v cmake)" || die "cmake not found"
+BUILD_ENV=(env -i "PATH=$(dirname "$CMAKE"):/usr/bin:/bin:/usr/sbin:/sbin" "HOME=$HOME" "TMPDIR=${TMPDIR:-/tmp}"
+           GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_COUNT=2
+           GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
+           GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false)
+"${BUILD_ENV[@]}" "$CMAKE" -S "$SRC" -B "$BUILD" -G Xcode \
     -DFLAYR_TUNE_COPY_AFTER_BUILD=OFF -DFLAYR_TUNE_BUILD_TESTS=OFF -DFLAYR_TUNE_BUILD_TOOLS=OFF >/dev/null
-cmake --build "$BUILD" --config Release --target FlayrTune_AU FlayrTune_VST3 -- -quiet
+"${BUILD_ENV[@]}" "$CMAKE" --build "$BUILD" --config Release --target FlayrTune_AU FlayrTune_VST3 -- -quiet
 
 ART="$BUILD/FlayrTune_artefacts/Release"
-echo "==> Checking for networking code"
+echo "==> Checking the JUCE patches and for networking code"
+JUCE_SRC="$(sed -n 's/^juce_SOURCE_DIR:STATIC=//p' "$BUILD/CMakeCache.txt")"
+[[ "$JUCE_SRC" == "$BUILD/_deps/juce-src" ]] || die "JUCE came from $JUCE_SRC, not from the pinned download"
+patches="$(cd "$SRC" && ls patches/*.patch | sed "s|^|$SRC/|" | paste -sd'|' -)"
+(cd "$JUCE_SRC" && "${BUILD_ENV[@]}" "$CMAKE" "-DPATCHES=$patches" -DCHECK_ONLY=ON -P "$SRC/cmake/ApplyPatch.cmake")
 "$SRC/scripts/check-no-network.sh" "$ART"
 STAGE="$(mktemp -d)/Flayr Tune"
 mkdir -p "$STAGE" "$DIST"
@@ -72,7 +95,9 @@ xcrun stapler staple "$STAGE/Flayr Tune.vst3"
 echo "==> Building the DMG"
 ln -s "/Library/Audio/Plug-Ins/Components" "$STAGE/Drag AU here (Logic, GarageBand)"
 ln -s "/Library/Audio/Plug-Ins/VST3" "$STAGE/Drag VST3 here (Ableton, FL, Cubase, Reaper...)"
-cp "$SRC/packaging/macos/Install.txt" "$STAGE/Install.txt"
+INSTALL_TXT="$SRC/packaging/macos/Install.txt"
+[[ -f "$INSTALL_TXT" && ! -L "$INSTALL_TXT" ]] || die "Install.txt is missing or a symlink"
+cp -P "$INSTALL_TXT" "$STAGE/Install.txt"
 rm -f "$DMG"
 hdiutil create -volname "Flayr Tune $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
 codesign --force --timestamp --sign "$IDENTITY" "$DMG"
@@ -85,14 +110,30 @@ spctl --assess --type open --context context:primary-signature --verbose "$DMG"
 echo "==> Done: $DMG"
 
 if [[ "${1:-}" == "--upload" ]]; then
-    gh release upload "$TAG" "$DMG" --clobber --repo FlayrLabs/flayr-tune
+    REPO=FlayrLabs/flayr-tune
+    # Only ever add to a draft: replacing files on a published release would swap what
+    # people already downloaded and verified.
+    [[ "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)" == "true" ]] \
+        || die "release $TAG is already published (or missing); refusing to change its files"
+    gh release upload "$TAG" "$DMG" --clobber --repo "$REPO"
     echo "==> Uploaded to release $TAG"
 
-    # Checksums for every file on the release, so users can verify their download.
+    # Checksums only for files we can vouch for: the DMG we just built and notarized
+    # (byte-identical to the local copy), and CI builds whose provenance attestation
+    # verifies. Anything else on the draft stops the script.
     sums_dir="$(mktemp -d)"
-    gh release download "v$VERSION" --repo FlayrLabs/flayr-tune --dir "$sums_dir" --pattern 'FlayrTune-*'
+    gh release download "$TAG" --repo "$REPO" --dir "$sums_dir" --pattern 'FlayrTune-*'
+    for asset in "$sums_dir"/FlayrTune-*; do
+        name="$(basename "$asset")"
+        if [[ "$name" == "$(basename "$DMG")" ]]; then
+            cmp -s "$asset" "$DMG" || die "$name on the release differs from the DMG just built"
+        else
+            gh attestation verify "$asset" --repo "$REPO" >/dev/null || die "$name has no valid build provenance attestation"
+        fi
+        echo "    verified $name"
+    done
     (cd "$sums_dir" && shasum -a 256 FlayrTune-* > SHA256SUMS.txt && cat SHA256SUMS.txt)
-    gh release upload "v$VERSION" "$sums_dir/SHA256SUMS.txt" --clobber --repo FlayrLabs/flayr-tune
+    gh release upload "$TAG" "$sums_dir/SHA256SUMS.txt" --clobber --repo "$REPO"
     rm -rf "$sums_dir"
     echo "==> Uploaded SHA256SUMS.txt"
 fi
