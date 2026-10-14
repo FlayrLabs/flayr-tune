@@ -45,6 +45,7 @@ public:
     std::atomic<bool> trackArmed { false };
     std::atomic<double> playheadSeconds { 0.0 };
     std::atomic<bool> hostPlaying { false };
+    static constexpr double kMaxPlayheadSeconds = 1.0e7;
 
 private:
     tune::Params readParams() const;

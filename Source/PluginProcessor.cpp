@@ -191,8 +191,12 @@ void FlayrTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
             else if (const auto secs = pos->getTimeInSeconds())
                 hostSample = *secs * getSampleRate();
         }
+    // The GUI walks the timeline from the playhead, so keep it finite and in a sane range.
+    const double maxSamples = kMaxPlayheadSeconds * engine.getSampleRate();
+    hostSample = std::isfinite (hostSample) ? juce::jlimit (-maxSamples, maxSamples, hostSample) : 0.0;
     hostPlaying.store (playing, std::memory_order_relaxed);
-    playheadSeconds.store (hostSample / engine.getSampleRate(), std::memory_order_relaxed);
+    playheadSeconds.store (juce::jlimit (0.0, kMaxPlayheadSeconds, hostSample / engine.getSampleRate()),
+                           std::memory_order_relaxed);
     engine.setTransport (playing, hostSample, trackArmed.load (std::memory_order_relaxed),
                          raw.graph->load() > 0.5f);
 
