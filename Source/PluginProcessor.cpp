@@ -2,6 +2,7 @@
 #include "PluginEditor.h"
 
 #include <cctype>
+#include <cstring>
 
 namespace
 {
@@ -252,9 +253,11 @@ const juce::Identifier kTrackTag ("PitchTrack");
 //  - at most kMaxXmlTags tags, counting every '<' (even one inside an attribute), so
 //    neither JUCE nor ValueTree::fromXml can ever recurse deeper than that;
 //  - a nesting estimate (+1 per '<', -1 per "</" or "/>") of at most kMaxXmlDepth;
-//  - every "&#" is a complete character reference: an optional x, 1-10 hex digits, ';'
-//    (JUCE 8.0.15 reads past the end of the buffer on a trailing "&#x"; see
-//    patches/juce-xml-entity-overread.patch).
+//  - every '&' starts a complete reference: "&amp;", "&lt;", "&gt;", "&quot;", "&apos;"
+//    or "&#" + an optional x + 1-10 hex digits + ';'. JUCE 8.0.15 reads past the end of
+//    the buffer on a trailing "&#x" (patches/juce-xml-entity-overread.patch), and looks
+//    for the ';' of any other name by scanning the rest of the text, so a few MB of '&'
+//    took quadratic time and hung the host.
 // Our own state is ASCII, two levels deep and about 40 tags, so it always passes.
 constexpr uint32_t kXmlMagic = 0x21324356;       // AudioProcessor::copyXmlToBinary header
 constexpr int kMaxStateBytes = 16 * 1024 * 1024; // a full 30-minute PitchTrack: ~3.1 MB, ~4.4 MB if incompressible
@@ -306,6 +309,16 @@ bool isSafeStateBlob (const void* data, int sizeInBytes)
             if (j == digits || j >= length || text[j] != ';')
                 return false;
         }
+        else if (c == '&')
+        {
+            auto is = [&] (const char* name)
+            {
+                const auto n = std::strlen (name);
+                return i + 1 + n <= length && std::memcmp (text + i + 1, name, n) == 0;
+            };
+            if (! (is ("amp;") || is ("lt;") || is ("gt;") || is ("quot;") || is ("apos;")))
+                return false;
+        }
         if (c != '<')
             continue;
         const auto next = i + 1 < length ? text[i + 1] : 0;
@@ -349,6 +362,17 @@ juce::String encodeTrack (const tune::PitchTrack& t)
 void decodeTrack (tune::PitchTrack& t, const juce::String& data)
 {
     t.clearAll();
+    // JUCE's base64 format is "<byte count>.<chars>", and fromBase64Encoding allocates
+    // whatever the count says before reading a character: "2000000000." asked for 2 GB,
+    // "-1." for SIZE_MAX (std::bad_alloc thrown into the host). Only a count the
+    // characters can actually fill gets through.
+    const int dot = data.indexOfChar ('.');
+    if (dot <= 0 || dot > 9 || ! data.substring (0, dot).containsOnly ("0123456789"))
+        return;
+    const auto declared = data.substring (0, dot).getLargeIntValue();
+    const auto encoded = (juce::int64) data.length() - dot - 1;
+    if (declared <= 0 || declared > encoded * 3 / 4 + 3)
+        return;
     juce::MemoryBlock packed;
     if (! packed.fromBase64Encoding (data))
         return;

@@ -18,12 +18,14 @@ extern "C" int LLVMFuzzerTestOneInput (const uint8_t* data, size_t size)
     fuzz::initJuce();
     fuzz::Reader in { data, size };
     const int mode = in.u8() % 4;
-    const auto rest = in.rest();
+    auto rest = in.rest();
 
+    // (Moved, not copied: JUCE's MemoryBlock copy-assignment calls memcpy with a null
+    // pointer for an empty block, which UBSan reports on glibc.)
     juce::MemoryBlock blob;
     switch (mode)
     {
-        case 0:  blob = rest; break;
+        case 0:  blob = std::move (rest); break;
         case 1:  blob = fuzz::wrapXml (rest.getData(), rest.getSize()); break;
         case 2:  blob = fuzz::stateWithTrack (fuzz::gzipBase64 (rest.getData(), rest.getSize())); break;
         default: blob = fuzz::stateWithTrack (rest.toBase64Encoding()); break;

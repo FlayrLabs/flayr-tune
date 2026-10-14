@@ -200,6 +200,21 @@ int main()
             p.setStateInformation (huge.getData(), (int) huge.getSize());
             check (std::isfinite (value (p, "retune")), std::string ("value ") + v + " loads as a finite number");
         }
+        setValue (p, "retune", 123.0f);
+        // Found by fuzz_state (timeout): for an '&' that isn't a known entity JUCE scans the
+        // rest of the text for ';', so megabytes of '&' took quadratic time (a host hang).
+        {
+            const auto start = juce::Time::getMillisecondCounterHiRes();
+            expectIgnored (blobFromBytes ("<FlayrTune>" + std::string (4 * 1024 * 1024, '&') + ";</FlayrTune>"),
+                           "4 MB of '&' refused");
+            expectIgnored (blobFromBytes ("<FlayrTune><PARAM id=\"retune\" value=\"&foo;\"/></FlayrTune>"),
+                           "unknown named entity refused");
+            check (juce::Time::getMillisecondCounterHiRes() - start < 2000.0, "and refused quickly");
+        }
+        auto named = blobFromBytes ("<FlayrTune><PARAM id=\"retune\" value=\"5\" x=\"&amp;&lt;&gt;&quot;&apos;\"/></FlayrTune>");
+        p.setStateInformation (named.getData(), (int) named.getSize());
+        check (std::abs (value (p, "retune") - 5.0f) < 0.01f, "the five XML entities still load");
+        setValue (p, "retune", 123.0f);
         auto refs = blobFromBytes ("<FlayrTune><PARAM id=\"&#114;etune\" value=\"&#x35;\"/></FlayrTune>");
         p.setStateInformation (refs.getData(), (int) refs.getSize());
         check (std::abs (value (p, "retune") - 5.0f) < 0.01f, "complete character references still load");
@@ -256,6 +271,23 @@ int main()
             onlyParams &= e->hasTagName ("PARAM") && e->getNumChildElements() == 0;
         check (value (j, "retune") == 7.0f && value (k, "retune") == 7.0f, "a project with junk nesting reloads after saving");
         check (onlyParams, "only our parameters are saved back");
+    }
+
+    {
+        // Found by fuzz_state: JUCE's base64 decoder allocates the byte count the text
+        // declares before reading it, so a tiny project could ask for 2 GB, or for SIZE_MAX
+        // (std::bad_alloc thrown into the host).
+        std::puts ("PitchTrack base64 with a lying byte count");
+        for (const char* data : { "-1.AAAA", "2000000000.AAAA", "99999999999999999999.AAAA", "8.AAAA", "1x.AAAA", ".AAAA" })
+        {
+            FlayrTuneProcessor p;
+            p.track.setInput (3, 60.0f);
+            auto blob = blobFromText (juce::String ("<FlayrTune><PARAM id=\"retune\" value=\"5\"/><PitchTrack data=\"") + data
+                                      + "\"/></FlayrTune>");
+            p.setStateInformation (blob.getData(), (int) blob.getSize());
+            check (std::abs (value (p, "retune") - 5.0f) < 0.01f && p.track.getExtent() == 0,
+                   std::string ("\"") + data + "\": parameters load, track empty, nothing huge allocated");
+        }
     }
 
     {

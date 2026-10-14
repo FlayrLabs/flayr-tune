@@ -165,6 +165,7 @@ int main (int argc, char** argv)
     saveXml ("poc-declaration", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" + small);
     saveXml ("poc-entities", "<FlayrTune><PARAM id=\"&#114;etune\" value=\"&#53;&#x30;\"/><PARAM id=\"x\" value=\"&lt;&gt;&amp;&quot;&apos;&#200;&#x1F600;\"/></FlayrTune>");
     saveXml ("poc-unbalanced", "<FlayrTune>" + param);
+    saveXml ("poc-amp-flood", "<FlayrTune>" + std::string (100000, '&') + ";</FlayrTune>");
     saveXml ("poc-values", "<FlayrTune><PARAM id=\"retune\" value=\"nan\"/><PARAM id=\"mix\" value=\"-inf\"/><PARAM id=\"key\" value=\"1e300\"/>"
                            "<PARAM id=\"scale\" value=\"-2147483648\"/><PARAM id=\"transpose\" value=\"3.5e38\"/><PARAM id=\"graph\" value=\"0.5\"/>"
                            "<PARAM id=\"retune\" value=\"7\"/><PARAM value=\"1\"/><PARAM id=\"output\"/></FlayrTune>");
@@ -186,6 +187,8 @@ int main (int argc, char** argv)
     {
         save (stateDir, name, 2, raw.getData(), raw.getSize());
     };
+    for (const char* lie : { "-1.AAAA", "2000000000.AAAA", "8.AAAA" })
+        saveBlob (juce::String ("track-base64-count-") + lie, fuzz::stateWithTrack (lie));
     saveTrack ("track-raw-10", trackPayload (10, 10, 60.0f, 62.0f, 1));
     saveTrack ("track-raw-modes", trackPayload (20, 20, 50.0f, 55.0f, 2));
     saveTrack ("track-raw-bad-mode", trackPayload (20, 20, 50.0f, 55.0f, 7));
