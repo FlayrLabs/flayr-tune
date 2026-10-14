@@ -24,6 +24,14 @@
 set -euo pipefail
 
 IDENTITY="${IDENTITY:-Developer ID Application: Flayr Labs LLC (NRNU83UJ68)}"
+REMOTE_URL="https://github.com/FlayrLabs/flayr-tune.git"
+# Test mode (tests/release_e2e_test.sh): a stand-in remote instead of GitHub, with
+# ad-hoc signing forced so nothing it produces can pass for a release.
+if [[ "${FLAYR_RELEASE_TEST:-}" == 1 ]]; then
+    echo "==> TEST MODE: remote ${FLAYR_RELEASE_TEST_REMOTE:?}, ad-hoc signing only; this is not a release" >&2
+    REMOTE_URL="$FLAYR_RELEASE_TEST_REMOTE"
+    IDENTITY="-"
+fi
 NOTARY_PROFILE="${NOTARY_PROFILE:-flayr-notary}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -41,8 +49,25 @@ case "${1:-}" in
     *) die "unknown argument $1" ;;
 esac
 # Fail before the long build if the upload step couldn't run.
+REPO="FlayrLabs/flayr-tune" # pinned
 if [[ "$UPLOAD" == 1 ]]; then
     for tool in gh jq shasum; do command -v "$tool" >/dev/null || die "$tool is needed for --upload"; done
+    # gh runs sealed, as in scripts/verify-release-assets.sh: absolute path, fixed PATH,
+    # HOME and token variables only; host/repo/config overrides stop the script.
+    GH_BIN="$(command -v gh)"
+    for v in GH_HOST GH_REPO GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_CONFIG_DIR; do
+        [[ -z "${!v:-}" ]] || die "$v is set; unset it (releases only talk to github.com/$REPO)"
+    done
+    gh() {
+        local pass=() var
+        [[ -n "${GH_TOKEN:-}" ]] && pass+=("GH_TOKEN=$GH_TOKEN")
+        [[ -n "${GITHUB_TOKEN:-}" ]] && pass+=("GITHUB_TOKEN=$GITHUB_TOKEN")
+        if [[ "${FLAYR_RELEASE_TEST:-}" == 1 ]]; then
+            while IFS= read -r var; do pass+=("$var=${!var}"); done < <(compgen -e | grep -E '^FLAYR_TEST_[A-Z0-9_]+$' || true)
+        fi
+        env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "HOME=$HOME" GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+            ${pass[@]+"${pass[@]}"} "$GH_BIN" "$@"
+    }
     help="$(gh attestation verify --help 2>&1)" || die "gh has no 'attestation verify'; update gh"
     for flag in --signer-workflow --source-ref --source-digest --deny-self-hosted-runners --cert-oidc-issuer; do
         grep -q -- "$flag" <<< "$help" || die "gh does not support attestation verify $flag; update gh"
@@ -76,10 +101,15 @@ TAG_SHA="$(g -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG^{commit}" || true)
 [[ -n "$TAG_SHA" ]] || die "tag $TAG does not exist; tag the release commit first"
 [[ "$HEAD_SHA" == "$TAG_SHA" ]] || die "HEAD is not at $TAG (HEAD $HEAD_SHA, $TAG $TAG_SHA)"
 # Asked of GitHub by URL from an empty directory: no local remote or insteadOf can redirect it.
-REMOTE_URL="https://github.com/FlayrLabs/flayr-tune.git"
-REMOTE_SHA="$(cd "$EMPTY" && g ls-remote "$REMOTE_URL" "refs/tags/$TAG^{}" | cut -f1)"
-[[ -n "$REMOTE_SHA" ]] || REMOTE_SHA="$(cd "$EMPTY" && g ls-remote "$REMOTE_URL" "refs/tags/$TAG" | cut -f1)"
-[[ "$REMOTE_SHA" == "$TAG_SHA" ]] || die "$TAG on GitHub (${REMOTE_SHA:-missing}) differs from the local tag; push it first"
+# ls-remote's patterns match ref-name suffixes (a branch "x/refs/tags/v1.3.0" would match),
+# so list all tags and require exactly one exact refs/tags/<tag>^{} (or, for a lightweight
+# tag, refs/tags/<tag>).
+remote_tags="$(cd "$EMPTY" && g ls-remote --tags "$REMOTE_URL")" || die "could not list the tags at $REMOTE_URL"
+exact_ref() { awk -v ref="$1" -F '\t' '$2 == ref { print $1 }' <<< "$remote_tags"; }
+REMOTE_SHA="$(exact_ref "refs/tags/$TAG^{}")"
+[[ -n "$REMOTE_SHA" ]] || REMOTE_SHA="$(exact_ref "refs/tags/$TAG")"
+[[ "$(wc -l <<< "$REMOTE_SHA" | tr -d ' ')" == 1 ]] || die "$TAG is not a single tag at $REMOTE_URL"
+[[ "$REMOTE_SHA" == "$TAG_SHA" ]] || die "$TAG at $REMOTE_URL (${REMOTE_SHA:-missing}) differs from the local tag; push it first"
 
 echo "==> Exporting $TAG ($TAG_SHA)"
 g clone --quiet --bare --no-local --no-tags "file://$ROOT" "$WORK/mirror.git"
@@ -113,8 +143,11 @@ BUILD_ENV=(env -i "PATH=$(dirname "$CMAKE"):/usr/bin:/bin:/usr/sbin:/sbin" "HOME
 
 ART="$BUILD/FlayrTune_artefacts/Release"
 echo "==> Checking the JUCE patches and for networking code"
-JUCE_SRC="$(sed -n 's/^juce_SOURCE_DIR:STATIC=//p' "$BUILD/CMakeCache.txt")"
-[[ "$JUCE_SRC" == "$BUILD/_deps/juce-src" ]] || die "JUCE came from $JUCE_SRC, not from the pinned download"
+# JUCE's own project(JUCE) caches JUCE_SOURCE_DIR (FetchContent's juce_SOURCE_DIR isn't cached).
+JUCE_SRC="$(sed -n 's/^JUCE_SOURCE_DIR:STATIC=//p' "$BUILD/CMakeCache.txt")"
+[[ -n "$JUCE_SRC" && -d "$JUCE_SRC" ]] || die "could not find JUCE_SOURCE_DIR in $BUILD/CMakeCache.txt"
+[[ "$(cd "$JUCE_SRC" && pwd -P)" == "$(cd "$BUILD/_deps/juce-src" && pwd -P)" ]] \
+    || die "JUCE came from $JUCE_SRC, not from the pinned download"
 patches="$(cd "$SRC" && ls patches/*.patch | sed "s|^|$SRC/|" | paste -sd'|' -)"
 (cd "$JUCE_SRC" && "${BUILD_ENV[@]}" "$CMAKE" "-DPATCHES=$patches" -DCHECK_ONLY=ON -P "$SRC/cmake/ApplyPatch.cmake")
 "$SRC/scripts/check-no-network.sh" "$ART"
@@ -153,9 +186,9 @@ spctl --assess --type open --context context:primary-signature --verbose "$DMG"
 echo "==> Done: $DMG"
 
 if [[ "$UPLOAD" == 1 ]]; then
-    REPO=FlayrLabs/flayr-tune
     # Only ever add to a draft: replacing files on a published release would swap what
-    # people already downloaded and verified.
+    # people already downloaded and verified. (The repository also has immutable
+    # releases enabled, so GitHub itself refuses changes once a release is published.)
     [[ "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)" == "true" ]] \
         || die "release $TAG is already published (or missing); refusing to change its files"
 
@@ -169,12 +202,21 @@ if [[ "$UPLOAD" == 1 ]]; then
 
     gh release upload "$TAG" "$DMG" "$sums_dir/SHA256SUMS.txt" --clobber --repo "$REPO"
 
-    # The release must now hold exactly what was checksummed.
+    # Afterwards the draft must hold exactly the allowed assets, each with the digest that
+    # was checksummed, and the uploaded SHA256SUMS.txt must be byte-for-byte ours.
     assets="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets')"
+    allowed="$(cut -d' ' -f3 "$sums_dir/SHA256SUMS.txt"; echo SHA256SUMS.txt)"
+    while IFS= read -r name; do
+        grep -qxF -- "$name" <<< "$allowed" || die "unexpected asset $name appeared on the draft; do not publish"
+    done < <(jq -r '.[].name' <<< "$assets")
     while read -r sum name; do
         [[ "$(jq -r --arg n "$name" '.[] | select(.name == $n) | .digest // empty' <<< "$assets")" == "sha256:$sum" ]] \
             || die "$name on the draft no longer matches SHA256SUMS.txt; do not publish"
     done < "$sums_dir/SHA256SUMS.txt"
+    mkdir "$sums_dir/check"
+    gh release download "$TAG" --repo "$REPO" --pattern SHA256SUMS.txt --dir "$sums_dir/check"
+    cmp -s "$sums_dir/SHA256SUMS.txt" "$sums_dir/check/SHA256SUMS.txt" \
+        || die "the SHA256SUMS.txt on the draft is not the one just written; do not publish"
     rm -rf "$sums_dir"
     echo "==> Uploaded $(basename "$DMG") and SHA256SUMS.txt to the draft release $TAG"
 fi

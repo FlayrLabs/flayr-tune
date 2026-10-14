@@ -21,7 +21,7 @@ set -euo pipefail
 
 [[ $# -eq 5 ]] || { echo "usage: $0 <tag> <tag commit sha> <version> <local DMG> <out dir>" >&2; exit 2; }
 TAG="$1" TAG_SHA="$2" VERSION="$3" DMG="$4" OUT="$5"
-REPO="${FLAYR_RELEASE_REPO:-FlayrLabs/flayr-tune}"
+REPO="FlayrLabs/flayr-tune" # pinned: no environment variable can point this elsewhere
 WORKFLOW_PATH=".github/workflows/release.yml"
 ISSUER="https://token.actions.githubusercontent.com"
 
@@ -30,6 +30,25 @@ die() { echo "error: $*" >&2; exit 1; }
 for tool in gh jq shasum; do
     command -v "$tool" >/dev/null || die "$tool is not installed"
 done
+
+# Every gh call runs sealed: an absolute gh, fixed system PATH, HOME (for gh's own login),
+# and only the token variables gh reads. Anything that could point gh at another host,
+# repository or configuration stops the script. (Test hook: with FLAYR_RELEASE_TEST=1,
+# FLAYR_TEST_* variables also reach gh, for tests/release_verify_test.sh's fake gh.)
+GH_BIN="$(command -v gh)"
+for v in GH_HOST GH_REPO GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_CONFIG_DIR; do
+    [[ -z "${!v:-}" ]] || die "$v is set; unset it (releases only talk to github.com/$REPO)"
+done
+gh() {
+    local pass=() var
+    [[ -n "${GH_TOKEN:-}" ]] && pass+=("GH_TOKEN=$GH_TOKEN")
+    [[ -n "${GITHUB_TOKEN:-}" ]] && pass+=("GITHUB_TOKEN=$GITHUB_TOKEN")
+    if [[ "${FLAYR_RELEASE_TEST:-}" == 1 ]]; then
+        while IFS= read -r var; do pass+=("$var=${!var}"); done < <(compgen -e | grep -E '^FLAYR_TEST_[A-Z0-9_]+$' || true)
+    fi
+    env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "HOME=$HOME" GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+        ${pass[@]+"${pass[@]}"} "$GH_BIN" "$@"
+}
 [[ "$TAG_SHA" =~ ^[0-9a-f]{40}$ ]] || die "not a commit SHA: $TAG_SHA"
 [[ -f "$DMG" ]] || die "no DMG at $DMG"
 [[ -d "$OUT" && -z "$(ls -A "$OUT")" ]] || die "$OUT must be an existing, empty directory"
