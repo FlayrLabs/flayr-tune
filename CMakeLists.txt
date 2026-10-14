@@ -11,22 +11,33 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(FLAYR_TUNE_COPY_AFTER_BUILD "Install the plugins into the user's plug-in folders after building" ON)
 option(FLAYR_TUNE_BUILD_TOOLS "Build the UI snapshot and render tools (snapshot needs a desktop session)" OFF)
 option(FLAYR_TUNE_BUILD_TESTS "Build the DSP test suite" ON)
+option(FLAYR_TUNE_BUILD_FUZZERS "Build the ASan/UBSan fuzz targets (development only, never for releases)" OFF)
 
 include(FetchContent)
+set(FLAYR_JUCE_PATCHES
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/juce-no-network.patch
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/juce-xml-entity-overread.patch
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/juce-double-exponent-overflow.patch)
+string(REPLACE ";" "|" FLAYR_JUCE_PATCHES "${FLAYR_JUCE_PATCHES}") # survives PATCH_COMMAND
 # Pinned to the commit, not the tag, so a moved tag can't change what gets built.
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG 91ad83ae34a81e0833b1a2b0866f54846370ae53 # 8.0.15
-    # Compiles juce_core's HTTP, socket and interface-enumeration code out when
-    # FLAYR_NO_NETWORK=1; the header of the patch explains it. Tune never uses the network.
-    PATCH_COMMAND ${CMAKE_COMMAND} -DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/patches/juce-no-network.patch
-                  -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyPatch.cmake
+    # Our patches to JUCE; the header of each explains it.
+    #  juce-no-network: compiles juce_core's HTTP, socket and interface-enumeration code
+    #    out when FLAYR_NO_NETWORK=1. Tune never uses the network.
+    #  juce-xml-entity-overread: fixes a heap over-read in the XML parser.
+    #  juce-double-exponent-overflow: fixes an int overflow parsing numbers like 1e99999999999.
+    PATCH_COMMAND ${CMAKE_COMMAND} "-DPATCHES=${FLAYR_JUCE_PATCHES}" -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyPatch.cmake
 )
 FetchContent_MakeAvailable(JUCE)
-# A JUCE tree from elsewhere (FETCHCONTENT_SOURCE_DIR_JUCE) skips PATCH_COMMAND; without
-# the patch FLAYR_NO_NETWORK would silently do nothing, so refuse to build.
-if(NOT EXISTS "${juce_SOURCE_DIR}/modules/juce_core/native/juce_Network_disabled.cpp")
-    message(FATAL_ERROR "JUCE at ${juce_SOURCE_DIR} lacks patches/juce-no-network.patch; apply it first")
+# A JUCE tree from elsewhere (FETCHCONTENT_SOURCE_DIR_JUCE) skips PATCH_COMMAND, and
+# without the patches FLAYR_NO_NETWORK would silently do nothing, so check them here.
+execute_process(COMMAND ${CMAKE_COMMAND} "-DPATCHES=${FLAYR_JUCE_PATCHES}" -DCHECK_ONLY=ON
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyPatch.cmake
+                WORKING_DIRECTORY "${juce_SOURCE_DIR}" RESULT_VARIABLE flayr_patches_missing)
+if(flayr_patches_missing)
+    message(FATAL_ERROR "JUCE at ${juce_SOURCE_DIR} is missing patches/*.patch; apply them first")
 endif()
 
 if(APPLE)
@@ -112,4 +123,46 @@ if(FLAYR_TUNE_BUILD_TOOLS)
     # Real-voice render: render in_mono_f32.wav out_prefix
     add_executable(render tools/render.cpp)
     target_include_directories(render PRIVATE Source)
+endif()
+
+if(FLAYR_TUNE_BUILD_FUZZERS)
+    # See tests/fuzz/README.md. Uses libFuzzer where the compiler has it (Linux clang);
+    # otherwise (Apple clang) tests/fuzz/fuzz_driver.cpp, a coverage-guided mutation
+    # fuzzer on -fsanitize-coverage=inline-8bit-counters with the same command line.
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-fsanitize=fuzzer")
+    check_cxx_source_compiles("#include <cstddef>
+#include <cstdint>
+extern \"C\" int LLVMFuzzerTestOneInput (const uint8_t*, size_t) { return 0; }" FLAYR_HAVE_LIBFUZZER)
+    unset(CMAKE_REQUIRED_FLAGS)
+    set(flayr_sanitizers -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g)
+
+    function(flayr_fuzz_app name)
+        juce_add_console_app(${name} PRODUCT_NAME ${name})
+        target_sources(${name} PRIVATE ${ARGN} Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/GraphEditor.cpp)
+        target_include_directories(${name} PRIVATE Source tests/fuzz)
+        target_compile_definitions(${name} PRIVATE
+            JucePlugin_Name="Flayr Tune" FLAYR_NO_NETWORK=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+        target_link_libraries(${name} PRIVATE juce::juce_audio_utils juce::juce_recommended_config_flags)
+        target_compile_options(${name} PRIVATE ${flayr_sanitizers})
+        target_link_options(${name} PRIVATE ${flayr_sanitizers})
+    endfunction()
+
+    foreach(target fuzz_state fuzz_host)
+        if(FLAYR_HAVE_LIBFUZZER)
+            flayr_fuzz_app(${target} tests/fuzz/${target}.cpp)
+            target_compile_options(${target} PRIVATE -fsanitize=fuzzer-no-link)
+            target_link_options(${target} PRIVATE -fsanitize=fuzzer)
+        else()
+            flayr_fuzz_app(${target} tests/fuzz/${target}.cpp tests/fuzz/fuzz_driver.cpp)
+            target_compile_options(${target} PRIVATE -fsanitize-coverage=inline-8bit-counters
+                -fsanitize-coverage-ignorelist=${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/coverage_ignore.txt)
+        endif()
+    endforeach()
+    if(NOT FLAYR_HAVE_LIBFUZZER)
+        # The driver reads the coverage counters; it doesn't need any of its own.
+        set_source_files_properties(tests/fuzz/fuzz_driver.cpp TARGET_DIRECTORY fuzz_state fuzz_host
+            PROPERTIES COMPILE_OPTIONS "-fno-sanitize-coverage=inline-8bit-counters")
+    endif()
+    flayr_fuzz_app(fuzz_make_corpus tests/fuzz/make_corpus.cpp)
 endif()

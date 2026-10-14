@@ -566,6 +566,7 @@ public:
     static constexpr double kMinF0 = 60.0;
     static constexpr double kMinSampleRate = 8000.0, kMaxSampleRate = 768000.0;
     static constexpr float kOutputLimit = 4.0f; // hard clip (+12 dBFS) so a fault can't blast the monitors
+    static constexpr float kInputLimit = 1000.0f; // +60 dBFS, far above any real signal
 
     static bool isSupportedRate (double sampleRate)
     {
@@ -662,26 +663,27 @@ public:
             h[i] = keyHist[i].load (std::memory_order_relaxed);
         return h;
     }
-    // Non-finite values (a corrupt preset, a buggy host) fall back to the defaults, so
-    // they can never reach the filters or the integer casts below.
+    // Non-finite values (a corrupt preset, a buggy host) fall back to the defaults and
+    // everything is clamped to a generous working range, so nothing absurd (concert A at
+    // 1e30 Hz, a 1e30-semitone transpose) can reach the filters or the integer casts below.
     void setParams (const Params& p)
     {
         const Params d;
         params = p;
-        auto fix = [] (float& v, float def) { if (! std::isfinite (v)) v = def; };
-        fix (params.retuneMs, d.retuneMs);
-        fix (params.humanize, d.humanize);
-        fix (params.expression, d.expression);
-        fix (params.naturalVibratoDb, d.naturalVibratoDb);
-        fix (params.transpose, d.transpose);
-        fix (params.concertA, d.concertA);
-        fix (params.throat, d.throat);
-        fix (params.tracking, d.tracking);
-        fix (params.vibRateHz, d.vibRateHz);
-        fix (params.vibDepthCents, d.vibDepthCents);
-        fix (params.vibDelayMs, d.vibDelayMs);
-        fix (params.mix, d.mix);
-        fix (params.outputGain, d.outputGain);
+        auto fix = [] (float& v, float def, float lo, float hi) { v = std::isfinite (v) ? std::clamp (v, lo, hi) : def; };
+        fix (params.retuneMs, d.retuneMs, 0.0f, 1000.0f);
+        fix (params.humanize, d.humanize, 0.0f, 1.0f);
+        fix (params.expression, d.expression, 0.0f, 1.0f);
+        fix (params.naturalVibratoDb, d.naturalVibratoDb, -24.0f, 24.0f);
+        fix (params.transpose, d.transpose, -24.0f, 24.0f);
+        fix (params.concertA, d.concertA, 400.0f, 480.0f);
+        fix (params.throat, d.throat, 0.25f, 4.0f);
+        fix (params.tracking, d.tracking, 0.0f, 1.0f);
+        fix (params.vibRateHz, d.vibRateHz, 0.1f, 20.0f);
+        fix (params.vibDepthCents, d.vibDepthCents, 0.0f, 200.0f);
+        fix (params.vibDelayMs, d.vibDelayMs, 0.0f, 10000.0f);
+        fix (params.mix, d.mix, 0.0f, 1.0f);
+        fix (params.outputGain, d.outputGain, 0.0f, 1000.0f);
         params.key = std::clamp (params.key, 0, 11);
         params.scale = std::clamp (params.scale, 0, (int) kScaleNames.size() - 1);
         params.inputType = std::clamp (params.inputType, 0, 3);
@@ -735,7 +737,9 @@ public:
             lpc.tick (written);
             for (int c = 0; c < numCh; ++c)
             {
-                const float x = std::isfinite (io[c][s]) ? io[c][s] : 0.0f; // NaN/Inf input becomes silence
+                // NaN/Inf input becomes silence; absurd levels are clipped before they can
+                // overflow the filters (each overflow costs a full reset on the audio thread).
+                const float x = std::isfinite (io[c][s]) ? std::clamp (io[c][s], -kInputLimit, kInputLimit) : 0.0f;
                 in[(size_t) c][idx] = x;
                 residual[(size_t) c][idx] = lpc.whiten (c, x);
                 m += x;

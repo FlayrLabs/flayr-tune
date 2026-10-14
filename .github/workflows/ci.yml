@@ -59,3 +59,46 @@ jobs:
             build/FlayrTune_artefacts/Release/LV2
           if-no-files-found: error
           retention-days: 14
+
+  fuzz:
+    name: Fuzz smoke (Linux, libFuzzer)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libfreetype6-dev libfontconfig1-dev libx11-dev libxcomposite-dev \
+            libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev libgl1-mesa-dev
+
+      - name: Build fuzzers (ASan + UBSan)
+        run: |
+          cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DFLAYR_TUNE_BUILD_FUZZERS=ON -DFLAYR_TUNE_BUILD_TESTS=OFF -DFLAYR_TUNE_COPY_AFTER_BUILD=OFF
+          grep -q 'FLAYR_HAVE_LIBFUZZER:INTERNAL=1' build-fuzz/CMakeCache.txt
+          cmake --build build-fuzz --target fuzz_state fuzz_host fuzz_make_corpus --parallel 4
+
+      - name: Fuzz each target for 60 s
+        working-directory: build-fuzz
+        run: |
+          A=RelWithDebInfo
+          ./fuzz_make_corpus_artefacts/$A/fuzz_make_corpus seeds/state seeds/host
+          mkdir -p corpus/state corpus/host artifacts
+          ./fuzz_state_artefacts/$A/fuzz_state -max_total_time=60 -timeout=20 -max_len=65536 \
+            -dict=../tests/fuzz/fuzz.dict -artifact_prefix=artifacts/ corpus/state seeds/state
+          ./fuzz_host_artefacts/$A/fuzz_host -max_total_time=60 -timeout=20 \
+            -artifact_prefix=artifacts/ corpus/host seeds/host
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: build-fuzz/artifacts
+          if-no-files-found: ignore
+          retention-days: 14

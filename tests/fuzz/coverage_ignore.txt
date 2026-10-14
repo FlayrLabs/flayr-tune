@@ -1,0 +1,10 @@
+# Code the fuzz driver's coverage counters skip (-fsanitize-coverage-ignorelist).
+# Counters inside bulk clear/fill loops stop them vectorising and made buffer resets
+# (Engine::prepare at 768 kHz, PitchTrack::clearAll) dominate the run time, while they
+# add no useful coverage. The C++ standard library is skipped for the same reason.
+src:*/c++/v1/*
+src:*/include/c++/*
+fun:*LpcFormant*reset*
+fun:*LpcFormant*prepare*
+fun:*Engine*reset*
+fun:*PitchTrack*clearAll*

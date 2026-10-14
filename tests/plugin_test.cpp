@@ -180,11 +180,82 @@ int main()
         p.setStateInformation (declared.getData(), (int) declared.getSize());
         check (std::abs (value (p, "retune") - 5.0f) < 0.01f, "a leading <?xml?> declaration is accepted");
         setValue (p, "retune", 123.0f);
+        // Found by fuzz_state: JUCE stepped over the terminating null after a trailing
+        // "&#x" and kept parsing past the end of the buffer (a heap over-read).
+        expectIgnored (blobFromBytes ("<e>&#x"), "trailing '&#x' refused (fuzz: heap over-read in JUCE)");
+        expectIgnored (blobFromBytes (small + "&#x4"), "trailing '&#x4' refused");
+        expectIgnored (blobFromBytes ("<FlayrTune><PARAM id=\"retune\" value=\"&#x"), "'&#x' at the end of an attribute refused");
+        expectIgnored (blobFromBytes ("<FlayrTune><PARAM id=\"retune\" value=\"&#x35\"/></FlayrTune>"),
+                       "unterminated character reference refused");
+        expectIgnored (blobFromBytes ("<FlayrTune><PARAM id=\"retune\" value=\"&#;\"/></FlayrTune>"),
+                       "empty character reference refused");
+        for (const char* text : { "<e>&#x", "<e>&#x4", "<e a=\"&#x", "<e>&#xZ</e>" })
+            juce::parseXML (juce::String (text)); // under ASan: patched JUCE stops at the end
+        check (true, "patched JUCE parser stays inside the buffer");
+        // Found by fuzz_state: JUCE's number parser overflowed an int on a huge exponent
+        // (undefined behaviour; patches/juce-double-exponent-overflow.patch).
+        for (const char* v : { "1e99999999999999999999", "-1e-99999999999999999999", "5e+2147483648" })
+        {
+            auto huge = blobFromBytes (std::string ("<FlayrTune><PARAM id=\"retune\" value=\"") + v + "\"/></FlayrTune>");
+            p.setStateInformation (huge.getData(), (int) huge.getSize());
+            check (std::isfinite (value (p, "retune")), std::string ("value ") + v + " loads as a finite number");
+        }
+        auto refs = blobFromBytes ("<FlayrTune><PARAM id=\"&#114;etune\" value=\"&#x35;\"/></FlayrTune>");
+        p.setStateInformation (refs.getData(), (int) refs.getSize());
+        check (std::abs (value (p, "retune") - 5.0f) < 0.01f, "complete character references still load");
+        setValue (p, "retune", 123.0f);
         juce::MemoryBlock huge (17 * 1024 * 1024, true);
         expectIgnored (huge, "17 MB blob refused");
 
         p.setStateInformation (good.getData(), (int) good.getSize());
         check (std::abs (value (p, "retune") - 5.0f) < 0.01f, "a well-formed state still loads");
+    }
+
+    {
+        // Found by fuzz_state (save -> load -> save oracle): parameters missing from a
+        // project kept this instance's values and were then saved without a value.
+        std::puts ("Loading replaces the whole state");
+        FlayrTuneProcessor p;
+        setValue (p, "retune", 123.0f);
+        setValue (p, "mix", 40.0f);
+        setValue (p, "live", 1.0f);
+        auto partial = blobFromText ("<FlayrTune><PARAM id=\"graph\" value=\"1\"/><PARAM id=\"key\"/></FlayrTune>");
+        p.setStateInformation (partial.getData(), (int) partial.getSize());
+        check (value (p, "retune") == 20.0f && value (p, "mix") == 100.0f && value (p, "live") == 0.0f
+                   && value (p, "graph") == 1.0f && value (p, "key") == 0.0f,
+               "parameters the project doesn't mention go to their defaults");
+        juce::MemoryBlock saved, again;
+        p.getStateInformation (saved);
+        auto xml = juce::AudioProcessor::getXmlFromBinary (saved.getData(), (int) saved.getSize());
+        bool allValued = xml != nullptr;
+        for (auto* param : p.getParameters())
+            if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (param))
+                allValued &= xml != nullptr && xml->getChildByAttribute ("id", r->paramID) != nullptr
+                             && xml->getChildByAttribute ("id", r->paramID)->hasAttribute ("value");
+        check (allValued, "every parameter is saved with a value");
+        FlayrTuneProcessor q;
+        setValue (q, "retune", 300.0f);
+        q.setStateInformation (saved.getData(), (int) saved.getSize());
+        q.getStateInformation (again);
+        check (again == saved, "save -> load -> save is stable, whatever the loading instance held");
+
+        // Found by fuzz_state: '/>' inside attributes hid real nesting from the pre-scan; the
+        // junk was kept, saved back properly nested (deeper than the scan allows), and the
+        // project then refused to load after its first save. Unknown content is now dropped.
+        auto junk = blobFromText ("<FlayrTune x=\"1\"><PARAM id=\"retune\" value=\"7\"/><P d=\"\"><a x=\"\"><a x=\"\">"
+                                  "<a x=\"/>\"><a><a x=\"\"><a x=\"\"><a></a></a></a></a></a></a></a></P></FlayrTune>");
+        FlayrTuneProcessor j;
+        j.setStateInformation (junk.getData(), (int) junk.getSize());
+        juce::MemoryBlock junkSaved;
+        j.getStateInformation (junkSaved);
+        FlayrTuneProcessor k;
+        k.setStateInformation (junkSaved.getData(), (int) junkSaved.getSize());
+        auto junkXml = juce::AudioProcessor::getXmlFromBinary (junkSaved.getData(), (int) junkSaved.getSize());
+        bool onlyParams = junkXml != nullptr && junkXml->getNumAttributes() == 0;
+        for (auto* e : junkXml->getChildIterator())
+            onlyParams &= e->hasTagName ("PARAM") && e->getNumChildElements() == 0;
+        check (value (j, "retune") == 7.0f && value (k, "retune") == 7.0f, "a project with junk nesting reloads after saving");
+        check (onlyParams, "only our parameters are saved back");
     }
 
     {
@@ -260,6 +331,21 @@ int main()
         p.apvts.getRawParameterValue ("output")->store (INFINITY);
         const float peak2 = play (p, 2.0, finite);
         check (finite && peak2 > 0.05f, "NaN injected at runtime: output finite and audible");
+
+        // Found by fuzz_host: finite but absurd values (1e30 in a choice parameter was cast
+        // to int, undefined behaviour) and NaN pushed through the host API (JUCE then cast
+        // NaN to int while writing the state).
+        // (Not transpose: PSOLA moves a pure test tone up onto its own spectral envelope,
+        // which is silent above the tone, so the check below would fail for a good reason.)
+        for (auto* id : { "key", "scale", "inputType", "natvib", "concertA", "vibRate", "vibDepth", "humanize" })
+            p.apvts.getRawParameterValue (id)->store (1e30f);
+        const float peak3 = play (p, 1.0, finite);
+        check (finite && peak3 > 0.05f, "1e30 in parameters: output finite and audible");
+        p.apvts.getParameter ("retune")->setValueNotifyingHost (NAN);
+        juce::MemoryBlock saved;
+        p.getStateInformation (saved);
+        auto savedXml = juce::AudioProcessor::getXmlFromBinary (saved.getData(), (int) saved.getSize());
+        check (savedXml != nullptr && ! savedXml->toString().containsIgnoreCase ("nan"), "a NaN parameter is saved as its default");
     }
 
     {

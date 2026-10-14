@@ -642,6 +642,17 @@ int main()
         p = {}; p.vibDepthCents = 50; p.vibRateHz = NAN; tryParams (p, "vibrato rate = NaN");
         p = {}; p.outputGain = INFINITY; tryParams (p, "output gain = Inf");
         p = {}; p.key = 1 << 30; p.scale = -5; p.inputType = 99; tryParams (p, "out-of-range key / scale / input type");
+        // Found by fuzz_host: Natural Vibrato at +1e30 dB overflowed to Inf * 0 = NaN and the
+        // NaN read position was cast to an integer (undefined behaviour; caught by UBSan).
+        for (bool live : { false, true })
+            for (float big : { 1e30f, -1e30f })
+            {
+                p = {}; p.liveMode = live;
+                p.naturalVibratoDb = p.transpose = p.concertA = p.throat = p.retuneMs = p.humanize = big;
+                p.expression = p.tracking = p.vibRateHz = p.vibDepthCents = p.vibDelayMs = big;
+                tryParams (p, std::string ("every parameter at ") + (big > 0 ? "+" : "-") + "1e30" + (live ? " (live)" : ""));
+            }
+        p = {}; p.naturalVibratoDb = 1e30f; p.liveMode = true; tryParams (p, "natural vibrato +1e30 dB (live)");
     }
 
     {

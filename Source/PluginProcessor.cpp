@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <cctype>
+
 namespace
 {
 struct Preset
@@ -129,7 +131,8 @@ tune::Params FlayrTuneProcessor::readParams() const
     };
     auto choice = [&get] (const std::atomic<float>* v, int fallback, int count)
     {
-        return juce::jlimit (0, count - 1, (int) get (v, (float) fallback));
+        // Clamp before the cast: converting a float beyond int's range (1e30) is undefined.
+        return (int) juce::jlimit (0.0f, (float) (count - 1), get (v, (float) fallback));
     };
 
     tune::Params p;
@@ -248,7 +251,10 @@ const juce::Identifier kTrackTag ("PitchTrack");
 //  - no "<!" at all, and "<?" only for the leading <?xml ...?> declaration;
 //  - at most kMaxXmlTags tags, counting every '<' (even one inside an attribute), so
 //    neither JUCE nor ValueTree::fromXml can ever recurse deeper than that;
-//  - a nesting estimate (+1 per '<', -1 per "</" or "/>") of at most kMaxXmlDepth.
+//  - a nesting estimate (+1 per '<', -1 per "</" or "/>") of at most kMaxXmlDepth;
+//  - every "&#" is a complete character reference: an optional x, 1-10 hex digits, ';'
+//    (JUCE 8.0.15 reads past the end of the buffer on a trailing "&#x"; see
+//    patches/juce-xml-entity-overread.patch).
 // Our own state is ASCII, two levels deep and about 40 tags, so it always passes.
 constexpr uint32_t kXmlMagic = 0x21324356;       // AudioProcessor::copyXmlToBinary header
 constexpr int kMaxStateBytes = 16 * 1024 * 1024; // a full 30-minute PitchTrack: ~3.1 MB, ~4.4 MB if incompressible
@@ -289,6 +295,17 @@ bool isSafeStateBlob (const void* data, int sizeInBytes)
             return false;
         if (c == '/' && i + 1 < length && text[i + 1] == '>')
             --depth;
+        if (c == '&' && i + 1 < length && text[i + 1] == '#')
+        {
+            size_t j = i + 2;
+            if (j < length && (text[j] == 'x' || text[j] == 'X'))
+                ++j;
+            const size_t digits = j;
+            while (j < length && j < digits + 10 && std::isxdigit (text[j]) != 0)
+                ++j;
+            if (j == digits || j >= length || text[j] != ';')
+                return false;
+        }
         if (c != '<')
             continue;
         const auto next = i + 1 < length ? text[i + 1] : 0;
@@ -365,6 +382,21 @@ void decodeTrack (tune::PitchTrack& t, const juce::String& data)
 void FlayrTuneProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
+    // A host can push NaN into a parameter. JUCE can't write NaN to XML (it converts it to
+    // int, which is undefined) and loading would only turn it into the default, so save that.
+    for (auto child : state)
+        for (int i = child.getNumProperties(); --i >= 0;)
+        {
+            const auto name = child.getPropertyName (i);
+            if (const auto& v = child.getProperty (name); v.isDouble() && ! std::isfinite ((double) v))
+            {
+                auto* param = dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (child.getProperty ("id").toString()));
+                if (param != nullptr && name == juce::Identifier ("value"))
+                    child.setProperty (name, param->convertFrom0to1 (param->getDefaultValue()), nullptr);
+                else
+                    child.removeProperty (name, nullptr);
+            }
+        }
     state.removeChild (state.getChildWithName (kTrackTag), nullptr);
     if (track.getExtent() > 0)
     {
@@ -396,23 +428,32 @@ void FlayrTuneProcessor::setStateInformation (const void* data, int sizeInBytes)
         shift.setProperty ("value", juce::jlimit (-6.0, 6.0, -12.0 * std::log2 (length)), nullptr);
         tree.appendChild (shift, nullptr);
     }
-    tree.removeChild (oldThroat, nullptr);
     const auto trackTree = tree.getChildWithName (kTrackTag);
     if (trackTree.isValid())
         decodeTrack (track, trackTree.getProperty ("data").toString());
     else
         track.clearAll();
-    tree.removeChild (trackTree, nullptr);
 
-    // "nan" or "inf" survive jlimit and would stick in the engine, so they become defaults.
+    // Only our own parameters are kept, rebuilt as a flat list: anything else in the file
+    // (unknown elements, nesting, stray attributes) would be saved back with the project,
+    // possibly deeper or larger than the pre-scan allows, and the project would then
+    // refuse to load after its first save. Loading replaces the whole state, so a
+    // parameter the file doesn't mention goes to its default rather than keeping this
+    // instance's value. "nan" or "inf" survive jlimit and would stick in the engine, so
+    // they become defaults too.
+    juce::ValueTree clean (apvts.state.getType());
     for (auto* param : getParameters())
         if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
         {
-            auto child = tree.getChildWithProperty ("id", ranged->paramID);
+            const auto child = tree.getChildWithProperty ("id", ranged->paramID);
             const double fallback = ranged->convertFrom0to1 (ranged->getDefaultValue());
-            if (child.isValid() && child.hasProperty ("value"))
-                child.setProperty ("value", finiteOr (child.getProperty ("value"), fallback), nullptr);
+            juce::ValueTree entry ("PARAM");
+            entry.setProperty ("id", ranged->paramID, nullptr);
+            entry.setProperty ("value", child.hasProperty ("value") ? finiteOr (child.getProperty ("value"), fallback) : fallback,
+                               nullptr);
+            clean.appendChild (entry, nullptr);
         }
+    tree = clean;
     apvts.replaceState (tree);
 
     // replaceState skips parameters whose stored value didn't change, which can leave
@@ -420,9 +461,8 @@ void FlayrTuneProcessor::setStateInformation (const void* data, int sizeInBytes)
     for (auto* param : getParameters())
         if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
         {
-            const auto child = tree.getChildWithProperty ("id", ranged->paramID);
-            if (child.isValid() && child.hasProperty ("value"))
-                ranged->setValueNotifyingHost (ranged->convertTo0to1 ((float) child.getProperty ("value")));
+            const auto saved = tree.getChildWithProperty ("id", ranged->paramID).getProperty ("value");
+            ranged->setValueNotifyingHost (ranged->convertTo0to1 ((float) saved));
         }
 }
 

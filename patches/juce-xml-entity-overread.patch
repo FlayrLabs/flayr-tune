@@ -1,0 +1,26 @@
+Flayr Tune patch for JUCE 8.0.15 (91ad83ae34a81e0833b1a2b0866f54846370ae53).
+
+XmlDocument::readEntity, hex branch: on "&#x" followed by a non-hex character
+it reports an error, carries on, and steps over that character. When the
+character is the string's terminating null (input ending in "&#x", "&#x4",
+...), parsing continues past the end of the buffer: a heap over-read that a
+crafted project file could trigger in the host (found by tests/fuzz/fuzz_state
+with ASan; minimal input "<e>&#x"). Only step forward when not at the end.
+
+Flayr Tune also refuses such blobs before parsing (isSafeStateBlob), so this
+is defence in depth. Applied by CMakeLists.txt via FetchContent PATCH_COMMAND.
+
+diff --git a/modules/juce_core/xml/juce_XmlDocument.cpp b/modules/juce_core/xml/juce_XmlDocument.cpp
+index 4d40e0b7c..38e9a2847 100644
+--- a/modules/juce_core/xml/juce_XmlDocument.cpp
++++ b/modules/juce_core/xml/juce_XmlDocument.cpp
+@@ -718,7 +718,8 @@ void XmlDocument::readEntity (String& result)
+                 ++input;
+             }
+ 
+-            ++input;
++            if (! input.isEmpty()) // Flayr patch: never step over the terminating null
++                ++input;
+         }
+         else if (input[0] >= '0' && input[0] <= '9')
+         {
