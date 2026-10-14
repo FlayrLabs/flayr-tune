@@ -75,6 +75,18 @@ if(FLAYR_TUNE_BUILD_TESTS)
     add_executable(engine_test tests/engine_test.cpp)
     target_include_directories(engine_test PRIVATE Source)
     add_test(NAME engine_test COMMAND engine_test)
+
+    # The plug-in wrapper against hostile project state, MIDI and host positions.
+    juce_add_console_app(plugin_test PRODUCT_NAME "plugin_test")
+    target_sources(plugin_test PRIVATE tests/plugin_test.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/GraphEditor.cpp)
+    target_include_directories(plugin_test PRIVATE Source)
+    target_compile_definitions(plugin_test PRIVATE
+        JucePlugin_Name="Flayr Tune" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
+    target_link_libraries(plugin_test PRIVATE juce::juce_audio_utils juce::juce_recommended_config_flags)
+    add_test(NAME plugin_test COMMAND plugin_test)
+
+    # A hang is a failure too.
+    set_tests_properties(engine_test plugin_test PROPERTIES TIMEOUT 300)
 endif()
 
 if(FLAYR_TUNE_BUILD_TOOLS)
