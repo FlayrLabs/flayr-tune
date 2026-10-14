@@ -59,13 +59,17 @@ codesign -dv --verbose=2 "/Library/Audio/Plug-Ins/Components/Flayr Tune.componen
 
 You should see `Notarized Developer ID` and `Developer ID Application: Flayr Labs LLC (NRNU83UJ68)`.
 
-**Windows and Linux:** these files are built from the tagged source by GitHub Actions, in public. Releases after 1.3.0 also carry a signed build provenance attestation. With the [GitHub CLI](https://cli.github.com):
+**Windows and Linux:** these files are built from the tagged source by GitHub Actions, in public, on GitHub-hosted runners. Releases after 1.3.0 also carry a signed build provenance attestation. With the [GitHub CLI](https://cli.github.com), check that a file was built by this repository's release workflow from the release tag (replace `v1.4.0` with the version you downloaded):
 
 ```sh
-gh attestation verify FlayrTune-*-Windows-Setup.exe --repo FlayrLabs/flayr-tune
+gh attestation verify FlayrTune-1.4.0-Windows-Setup.exe --repo FlayrLabs/flayr-tune \
+  --signer-workflow FlayrLabs/flayr-tune/.github/workflows/release.yml \
+  --source-ref refs/tags/v1.4.0 --deny-self-hosted-runners
 ```
 
-The Windows installer isn't Authenticode-signed yet, so Windows SmartScreen may warn about it.
+**The Windows installer and plug-in are not Authenticode-signed**, so Windows SmartScreen may warn about them and Windows itself can't tell you who made them. Check them before installing: the file's SHA-256 must appear in the release's `SHA256SUMS.txt` (the `certutil` command above), and the attestation command above must pass. The installer is built with a pinned Inno Setup 6.7.1, verified by its SHA-256 (`packaging/windows/build-installer.ps1`).
+
+**Releases are immutable.** The repository has GitHub's immutable releases turned on: once a release is published, its files and tag can't be changed or replaced, by anyone. Our release workflow and scripts also refuse to touch a release that isn't a draft, and `SHA256SUMS.txt` only lists files whose provenance was verified (`scripts/verify-release-assets.sh`).
 
 ## Checking for networking code
 

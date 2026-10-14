@@ -27,7 +27,9 @@ The Mac build is signed and notarized, so it opens without security warnings.
 
 ### Windows
 Run the installer. It puts the plug-in in `C:\Program Files\Common Files\VST3`, where every VST3 host looks.
-The installer isn't code-signed yet, so Windows may say "Windows protected your PC": click **More info**, then **Run anyway**.
+The installer isn't code-signed (no Authenticode signature) yet, so Windows may say "Windows protected your PC". Before you
+click **More info**, then **Run anyway**, check the download against `SHA256SUMS.txt` and its build provenance as
+described in [Verifying your download](SECURITY.md#verifying-your-download).
 
 ### Linux
 ```sh
