@@ -1,0 +1,221 @@
+Flayr Tune patch for JUCE 8.0.15 (91ad83ae34a81e0833b1a2b0866f54846370ae53).
+
+Flayr Tune never touches the network, but juce_core always compiles in HTTP
+(WinINet on Windows, NSURLSession on macOS, raw sockets on Linux), the
+StreamingSocket / DatagramSocket classes and network-interface enumeration,
+so the shipped plug-ins imported WININET.dll, WS2_32.dll, socket(), connect()
+and friends. With FLAYR_NO_NETWORK=1 this patch:
+
+  * replaces juce_Socket.cpp, juce_IPAddress_posix.h and juce_Network_<os>
+    with native/juce_Network_disabled.cpp: stubs with the same API that fail
+    at once (no request is sent, no socket is opened);
+  * stops juce_core auto-linking wininet.lib and ws2_32.lib on Windows, so
+    any network call that slips back in is a link error rather than an import.
+
+Process::openEmailWithAttachments lives in the same native files and is
+stubbed to return false; Tune never calls it. Applied by CMakeLists.txt via
+FetchContent PATCH_COMMAND (cmake/ApplyPatch.cmake). git apply ignores this
+preamble.
+
+diff --git a/modules/juce_core/juce_core.cpp b/modules/juce_core/juce_core.cpp
+index f09d1d575..18283a53c 100644
+--- a/modules/juce_core/juce_core.cpp
++++ b/modules/juce_core/juce_core.cpp
+@@ -169,7 +169,9 @@
+ 
+ #include "zip/juce_zlib.h"
+ #include "network/juce_NamedPipe.cpp"
+-#include "network/juce_Socket.cpp"
++#if ! FLAYR_NO_NETWORK
++ #include "network/juce_Socket.cpp"
++#endif
+ #include "network/juce_IPAddress.cpp"
+ #include "streams/juce_BufferedInputStream.cpp"
+ #include "streams/juce_FileInputSource.cpp"
+@@ -211,14 +213,22 @@
+ #include "native/juce_PlatformTimerListener.h"
+ 
+ //==============================================================================
+-#if ! JUCE_WINDOWS && (! JUCE_ANDROID || __ANDROID_API__ >= 24)
++#if FLAYR_NO_NETWORK
++ #if JUCE_USE_CURL
++  #error "FLAYR_NO_NETWORK needs JUCE_USE_CURL=0"
++ #endif
++ // Flayr patch: sockets, HTTP and interface enumeration are replaced by stubs that always fail.
++ #include "native/juce_Network_disabled.cpp"
++#elif ! JUCE_WINDOWS && (! JUCE_ANDROID || __ANDROID_API__ >= 24)
+  #include "native/juce_IPAddress_posix.h"
+ #endif
+ 
+ //==============================================================================
+ #if JUCE_MAC || JUCE_IOS
+  #include "native/juce_Files_mac.mm"
+- #include "native/juce_Network_mac.mm"
++ #if ! FLAYR_NO_NETWORK
++  #include "native/juce_Network_mac.mm"
++ #endif
+  #include "native/juce_Strings_mac.mm"
+  #include "native/juce_SharedCode_intel.h"
+  #include "native/juce_SystemStats_mac.mm"
+@@ -228,7 +238,9 @@
+ 
+ //==============================================================================
+ #elif JUCE_WINDOWS
+- #include "native/juce_Network_windows.cpp"
++ #if ! FLAYR_NO_NETWORK
++  #include "native/juce_Network_windows.cpp"
++ #endif
+  #include "native/juce_Registry_windows.cpp"
+  #include "native/juce_SystemStats_windows.cpp"
+  #include "native/juce_Threads_windows.cpp"
+@@ -239,7 +251,9 @@
+ #elif JUCE_LINUX
+  #include "native/juce_CommonFile_linux.cpp"
+  #include "native/juce_Files_linux.cpp"
+- #include "native/juce_Network_linux.cpp"
++ #if ! FLAYR_NO_NETWORK
++  #include "native/juce_Network_linux.cpp"
++ #endif
+  #if JUCE_USE_CURL
+   #include "native/juce_Network_curl.cpp"
+  #endif
+@@ -251,7 +265,9 @@
+ #elif JUCE_BSD
+  #include "native/juce_CommonFile_linux.cpp"
+  #include "native/juce_Files_linux.cpp"
+- #include "native/juce_Network_linux.cpp"
++ #if ! FLAYR_NO_NETWORK
++  #include "native/juce_Network_linux.cpp"
++ #endif
+  #if JUCE_USE_CURL
+   #include "native/juce_Network_curl.cpp"
+  #endif
+diff --git a/modules/juce_core/native/juce_BasicNativeHeaders.h b/modules/juce_core/native/juce_BasicNativeHeaders.h
+index a4d03b656..a2d90182e 100644
+--- a/modules/juce_core/native/juce_BasicNativeHeaders.h
++++ b/modules/juce_core/native/juce_BasicNativeHeaders.h
+@@ -145,9 +145,11 @@
+  #if ! JUCE_DONT_AUTOLINK_TO_WIN32_LIBRARIES
+   #pragma comment (lib, "kernel32.lib")
+   #pragma comment (lib, "user32.lib")
+-  #pragma comment (lib, "wininet.lib")
++  #if ! FLAYR_NO_NETWORK // Flayr patch: a leftover network call becomes a link error
++   #pragma comment (lib, "wininet.lib")
++   #pragma comment (lib, "ws2_32.lib")
++  #endif
+   #pragma comment (lib, "advapi32.lib")
+-  #pragma comment (lib, "ws2_32.lib")
+   #pragma comment (lib, "version.lib")
+   #pragma comment (lib, "shlwapi.lib")
+   #pragma comment (lib, "winmm.lib")
+diff --git a/modules/juce_core/native/juce_Network_disabled.cpp b/modules/juce_core/native/juce_Network_disabled.cpp
+new file mode 100644
+index 000000000..e36eae0bc
+--- /dev/null
++++ b/modules/juce_core/native/juce_Network_disabled.cpp
+@@ -0,0 +1,105 @@
++/*
++  ==============================================================================
++
++   Flayr patch (not part of upstream JUCE), used when FLAYR_NO_NETWORK=1.
++
++   Replaces every piece of juce_core that can talk to the network (HTTP via
++   WinINet / NSURLSession / BSD sockets, StreamingSocket, DatagramSocket and
++   network-interface enumeration) with stubs that fail immediately. The public
++   API still links, so the rest of JUCE builds unchanged, but the binary carries
++   no networking code and imports no networking functions.
++
++  ==============================================================================
++*/
++
++#if JUCE_ANDROID || JUCE_IOS || JUCE_WASM
++ #error "FLAYR_NO_NETWORK is only implemented for macOS, Windows and Linux"
++#endif
++
++namespace juce
++{
++
++//==============================================================================
++// HTTP: every request fails before anything is sent.
++class WebInputStream::Pimpl
++{
++public:
++    Pimpl (WebInputStream&, const URL&, bool) {}
++
++    void withExtraHeaders (const String&)                       {}
++    void withCustomRequestCommand (const String&)               {}
++    void withConnectionTimeout (int)                            {}
++    void withNumRedirectsToFollow (int)                         {}
++    StringPairArray getRequestHeaders() const                   { return {}; }
++    StringPairArray getResponseHeaders() const                  { return {}; }
++    int getStatusCode() const                                   { return 0; }
++    bool connect (WebInputStream::Listener*)                    { return false; }
++    bool isError() const                                        { return true; }
++    void cancel()                                               {}
++    bool isExhausted()                                          { return true; }
++    int64 getPosition()                                         { return 0; }
++    int64 getTotalLength()                                      { return -1; }
++    int read (void*, int)                                       { return 0; }
++    bool setPosition (int64)                                    { return false; }
++
++    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Pimpl)
++};
++
++std::unique_ptr<URL::DownloadTask> URL::downloadToFile (const File& targetLocation, const DownloadTaskOptions& options)
++{
++    // Runs on the stub stream above, so it finishes at once with an error.
++    return URL::DownloadTask::createFallbackDownloader (*this, targetLocation, options);
++}
++
++//==============================================================================
++// No interface enumeration either: there are no addresses to report.
++void MACAddress::findAllAddresses (Array<MACAddress>&) {}
++void IPAddress::findAllAddresses (Array<IPAddress>&, bool) {}
++IPAddress IPAddress::getInterfaceBroadcastAddress (const IPAddress&) { return {}; }
++
++bool JUCE_CALLTYPE Process::openEmailWithAttachments (const String&, const String&, const String&, const StringArray&)
++{
++    return false;
++}
++
++//==============================================================================
++// Sockets: nothing can be opened, bound, connected or listened on.
++StreamingSocket::StreamingSocket() {}
++
++StreamingSocket::StreamingSocket (const String& host, int portNum, int, const SocketOptions& optionsIn)
++    : options (optionsIn), hostName (host), portNumber (portNum)
++{
++}
++
++StreamingSocket::~StreamingSocket() = default;
++
++int StreamingSocket::read (void*, int, bool)                     { return -1; }
++int StreamingSocket::write (const void*, int)                    { return -1; }
++int StreamingSocket::waitUntilReady (bool, int)                  { return -1; }
++bool StreamingSocket::bindToPort (int)                           { return false; }
++bool StreamingSocket::bindToPort (int, const String&)            { return false; }
++int StreamingSocket::getBoundPort() const noexcept               { return -1; }
++bool StreamingSocket::connect (const String&, int, int)          { return false; }
++void StreamingSocket::close()                                    { connected = false; isListener = false; }
++bool StreamingSocket::createListener (int, const String&)        { return false; }
++StreamingSocket* StreamingSocket::waitForNextConnection() const  { return nullptr; }
++bool StreamingSocket::isLocal() const noexcept                   { return false; }
++
++//==============================================================================
++DatagramSocket::DatagramSocket (bool, const SocketOptions& optionsIn) : options { optionsIn } {}
++DatagramSocket::~DatagramSocket() = default;
++
++void DatagramSocket::shutdown()                                  {}
++bool DatagramSocket::bindToPort (int)                            { return false; }
++bool DatagramSocket::bindToPort (int, const String&)             { return false; }
++int DatagramSocket::getBoundPort() const noexcept                { return -1; }
++int DatagramSocket::waitUntilReady (bool, int)                   { return -1; }
++int DatagramSocket::read (void*, int, bool)                      { return -1; }
++int DatagramSocket::read (void*, int, bool, String&, int&)       { return -1; }
++int DatagramSocket::write (const String&, int, const void*, int) { return -1; }
++bool DatagramSocket::joinMulticast (const String&)               { return false; }
++bool DatagramSocket::leaveMulticast (const String&)              { return false; }
++bool DatagramSocket::setMulticastLoopbackEnabled (bool)          { return false; }
++bool DatagramSocket::setEnablePortReuse (bool)                   { return false; }
++
++} // namespace juce

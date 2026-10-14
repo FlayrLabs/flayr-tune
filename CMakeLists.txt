@@ -17,8 +17,17 @@ include(FetchContent)
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG 91ad83ae34a81e0833b1a2b0866f54846370ae53 # 8.0.15
+    # Compiles juce_core's HTTP, socket and interface-enumeration code out when
+    # FLAYR_NO_NETWORK=1; the header of the patch explains it. Tune never uses the network.
+    PATCH_COMMAND ${CMAKE_COMMAND} -DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/patches/juce-no-network.patch
+                  -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyPatch.cmake
 )
 FetchContent_MakeAvailable(JUCE)
+# A JUCE tree from elsewhere (FETCHCONTENT_SOURCE_DIR_JUCE) skips PATCH_COMMAND; without
+# the patch FLAYR_NO_NETWORK would silently do nothing, so refuse to build.
+if(NOT EXISTS "${juce_SOURCE_DIR}/modules/juce_core/native/juce_Network_disabled.cpp")
+    message(FATAL_ERROR "JUCE at ${juce_SOURCE_DIR} lacks patches/juce-no-network.patch; apply it first")
+endif()
 
 if(APPLE)
     set(FLAYR_TUNE_FORMATS AU VST3)
@@ -57,6 +66,7 @@ target_sources(FlayrTune PRIVATE
 target_include_directories(FlayrTune PRIVATE Source)
 
 target_compile_definitions(FlayrTune PUBLIC
+    FLAYR_NO_NETWORK=1
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_DISPLAY_SPLASH_SCREEN=0
@@ -82,7 +92,7 @@ if(FLAYR_TUNE_BUILD_TESTS)
     target_sources(plugin_test PRIVATE tests/plugin_test.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/GraphEditor.cpp)
     target_include_directories(plugin_test PRIVATE Source)
     target_compile_definitions(plugin_test PRIVATE
-        JucePlugin_Name="Flayr Tune" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
+        JucePlugin_Name="Flayr Tune" FLAYR_NO_NETWORK=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
     target_link_libraries(plugin_test PRIVATE juce::juce_audio_utils juce::juce_recommended_config_flags)
     add_test(NAME plugin_test COMMAND plugin_test)
 
@@ -96,7 +106,7 @@ if(FLAYR_TUNE_BUILD_TOOLS)
     target_sources(FlayrTuneSnapshot PRIVATE tools/snapshot.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/GraphEditor.cpp)
     target_include_directories(FlayrTuneSnapshot PRIVATE Source)
     target_compile_definitions(FlayrTuneSnapshot PRIVATE
-        JucePlugin_Name="Flayr Tune" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
+        JucePlugin_Name="Flayr Tune" FLAYR_NO_NETWORK=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
     target_link_libraries(FlayrTuneSnapshot PRIVATE juce::juce_audio_utils juce::juce_recommended_config_flags)
 
     # Real-voice render: render in_mono_f32.wav out_prefix

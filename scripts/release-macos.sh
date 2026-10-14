@@ -50,6 +50,8 @@ cmake -S "$SRC" -B "$BUILD" -G Xcode \
 cmake --build "$BUILD" --config Release --target FlayrTune_AU FlayrTune_VST3 -- -quiet
 
 ART="$BUILD/FlayrTune_artefacts/Release"
+echo "==> Checking for networking code"
+"$SRC/scripts/check-no-network.sh" "$ART"
 STAGE="$(mktemp -d)/Flayr Tune"
 mkdir -p "$STAGE" "$DIST"
 cp -R "$ART/AU/Flayr Tune.component" "$ART/VST3/Flayr Tune.vst3" "$STAGE/"

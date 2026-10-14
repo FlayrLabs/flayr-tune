@@ -45,6 +45,10 @@ jobs:
       - name: DSP tests
         run: ctest --test-dir build -C Release --output-on-failure
 
+      - name: No networking in the plug-in
+        shell: bash
+        run: scripts/check-no-network.sh build/FlayrTune_artefacts/Release
+
       - name: Upload plug-ins
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

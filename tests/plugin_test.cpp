@@ -324,6 +324,25 @@ int main()
         check (play (p, 1.0, finite) > 0.05f && finite, "back to normal at 48 kHz");
     }
 
+    {
+        std::puts ("No networking (FLAYR_NO_NETWORK): the JUCE API links but fails at once");
+       #if ! FLAYR_NO_NETWORK
+        check (false, "built without FLAYR_NO_NETWORK");
+       #endif
+        // Port 9 / a reserved address: nothing would answer even if the stubs were missing.
+        juce::WebInputStream web (juce::URL ("http://192.0.2.1:9/"), false);
+        check (! web.connect (nullptr) && web.isError() && web.read (nullptr, 0) <= 0, "WebInputStream never connects");
+        check (juce::URL ("http://192.0.2.1:9/").createInputStream (juce::URL::InputStreamOptions (
+                   juce::URL::ParameterHandling::inAddress).withConnectionTimeoutMs (100)) == nullptr,
+               "URL::createInputStream returns nothing");
+        juce::StreamingSocket tcp;
+        check (! tcp.connect ("192.0.2.1", 9, 100) && ! tcp.createListener (0) && ! tcp.bindToPort (0), "no TCP socket");
+        juce::DatagramSocket udp;
+        check (! udp.bindToPort (0) && udp.write ("192.0.2.1", 9, "x", 1) < 0, "no UDP socket");
+        check (juce::IPAddress::getAllAddresses().isEmpty() && juce::MACAddress::getAllAddresses().isEmpty(),
+               "no interface enumeration");
+    }
+
     std::printf ("\n%s (%d failures)\n", failures == 0 ? "ALL PASSED" : "FAILURES", failures);
     return failures == 0 ? 0 : 1;
 }

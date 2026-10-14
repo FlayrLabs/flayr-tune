@@ -35,7 +35,7 @@ Audio quality bugs and crashes that need no untrusted input are regular bugs: pl
 
 ## What Flayr Tune does and doesn't do
 
-- **No network access.** The plug-in never connects to the internet. There is no telemetry, no analytics, no licence check and no auto-update.
+- **No network access, and no networking code.** The plug-in never connects to the internet. There is no telemetry, no analytics, no licence check and no auto-update. Releases after 1.3.0 go further: the HTTP, socket and network-interface code that JUCE normally compiles in is replaced by stubs that always fail ([`patches/juce-no-network.patch`](patches/juce-no-network.patch)), so the plug-in binary imports no networking functions at all. See [Checking for networking code](#checking-for-networking-code).
 - **No files written** outside your DAW project. Settings and Graph edits are saved inside the project by your DAW.
 - **No elevated privileges.** The plug-in runs with your DAW's permissions. The installers only copy the plug-in into the standard plug-in folders.
 - Untrusted data the plug-in reads (saved state from a project) is size-limited and validated before use.
@@ -66,5 +66,30 @@ gh attestation verify FlayrTune-*-Windows-Setup.exe --repo FlayrLabs/flayr-tune
 ```
 
 The Windows installer isn't Authenticode-signed yet, so Windows SmartScreen may warn about it.
+
+## Checking for networking code
+
+Releases after 1.3.0 contain no networking code, and CI fails any build whose plug-in imports a
+networking API ([`scripts/check-no-network.sh`](scripts/check-no-network.sh)). You can check an
+installed plug-in yourself with your platform's own tools; each command should print nothing:
+
+```sh
+# macOS (repeat with -arch x86_64 on Intel)
+nm -u -arch arm64 "/Library/Audio/Plug-Ins/VST3/Flayr Tune.vst3/Contents/MacOS/Flayr Tune" \
+  | grep -E '^_(socket|connect|bind|listen|accept|getaddrinfo|send|sendto|recv|recvfrom)$|NSURLSession|CFNetwork'
+
+# Linux
+nm -D --undefined-only ~/.vst3/"Flayr Tune.vst3"/Contents/x86_64-linux/"Flayr Tune.so" \
+  | grep -wE 'socket|connect|bind|listen|accept|getaddrinfo|send|sendto|recv|recvfrom'
+```
+
+```bat
+:: Windows, from a "Developer Command Prompt for VS" (dumpbin ships with Visual Studio)
+dumpbin /imports "C:\Program Files\Common Files\VST3\Flayr Tune.vst3\Contents\x86_64-win\Flayr Tune.vst3" | findstr /i "wininet winhttp ws2_32 wsock32"
+```
+
+Two things you may still see, neither of which is networking: on Linux, `socketpair`, which
+JUCE's message loop uses to wake itself inside the process (`AF_LOCAL`, never a network
+socket); and `gethostname`, which reads the computer's name.
 
 You can also build Flayr Tune yourself from source; see the [README](README.md#build-from-source).

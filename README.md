@@ -142,7 +142,8 @@ Bug reports, DAW compatibility notes and pull requests are welcome. See [CONTRIB
 
 ## Security
 
-Flayr Tune makes no network connections and collects no data. Every release includes
+Flayr Tune makes no network connections and collects no data; the plug-in contains no networking
+code at all, and [you can check that yourself](SECURITY.md#checking-for-networking-code). Every release includes
 `SHA256SUMS.txt`, the Mac build is signed and notarized, and the Windows and Linux builds carry
 GitHub build provenance. See [SECURITY.md](SECURITY.md) to verify a download or report a
 vulnerability privately.
