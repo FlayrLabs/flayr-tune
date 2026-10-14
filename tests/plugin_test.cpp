@@ -94,6 +94,7 @@ struct FakeHead : juce::AudioPlayHead
 
 int main()
 {
+    std::setvbuf (stdout, nullptr, _IONBF, 0); // CI shows the last test reached, even on a crash
     juce::ScopedJuceInitialiser_GUI juceInit;
 
     {

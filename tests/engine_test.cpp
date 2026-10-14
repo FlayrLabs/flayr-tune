@@ -161,6 +161,7 @@ static Engine& fresh (Engine& e, const Params& p, double sr = 48000.0)
 
 int main()
 {
+    std::setvbuf (stdout, nullptr, _IONBF, 0); // CI shows the last test reached, even on a crash
     const double sr = 48000.0;
     const double a3 = 220.0;
     const auto cents = [] (double c) { return std::pow (2.0, c / 1200.0); };
