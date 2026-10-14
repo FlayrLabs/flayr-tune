@@ -13,10 +13,11 @@ option(FLAYR_TUNE_BUILD_TOOLS "Build the UI snapshot and render tools (snapshot 
 option(FLAYR_TUNE_BUILD_TESTS "Build the DSP test suite" ON)
 
 include(FetchContent)
+# Pinned to the commit, not the tag, so a moved tag can't change what gets built.
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG 8.0.15
-    GIT_SHALLOW TRUE)
+    GIT_TAG 91ad83ae34a81e0833b1a2b0866f54846370ae53 # 8.0.15
+)
 FetchContent_MakeAvailable(JUCE)
 
 if(APPLE)
