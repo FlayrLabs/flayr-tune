@@ -1,4 +1,4 @@
-Flayr Tune patch for JUCE 8.0.15 (91ad83ae34a81e0833b1a2b0866f54846370ae53).
+Flayr Tune patch for JUCE 8.0.16-security (ea77444750de45e036e0279bb0291144bf8e3688).
 
 XmlDocument::readEntity, hex branch: on "&#x" followed by a non-hex character
 it reports an error, carries on, and steps over that character. When the
@@ -10,8 +10,10 @@ with ASan; minimal input "<e>&#x"). Only step forward when not at the end.
 Flayr Tune also refuses such blobs before parsing (isSafeStateBlob), so this
 is defence in depth. Applied by CMakeLists.txt via FetchContent PATCH_COMMAND.
 
+Flayr-Patch-Marker: modules/juce_core/xml/juce_XmlDocument.cpp FLAYR_PATCH juce-xml-entity-overread
+
 diff --git a/modules/juce_core/xml/juce_XmlDocument.cpp b/modules/juce_core/xml/juce_XmlDocument.cpp
-index 4d40e0b7c..38e9a2847 100644
+index 4d40e0b7c7..ed032b6d0b 100644
 --- a/modules/juce_core/xml/juce_XmlDocument.cpp
 +++ b/modules/juce_core/xml/juce_XmlDocument.cpp
 @@ -718,7 +718,8 @@ void XmlDocument::readEntity (String& result)
@@ -19,7 +21,7 @@ index 4d40e0b7c..38e9a2847 100644
              }
  
 -            ++input;
-+            if (! input.isEmpty()) // Flayr patch: never step over the terminating null
++            if (! input.isEmpty()) // FLAYR_PATCH juce-xml-entity-overread: never step over the terminating null
 +                ++input;
          }
          else if (input[0] >= '0' && input[0] <= '9')

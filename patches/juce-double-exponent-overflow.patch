@@ -1,4 +1,4 @@
-Flayr Tune patch for JUCE 8.0.15 (91ad83ae34a81e0833b1a2b0866f54846370ae53).
+Flayr Tune patch for JUCE 8.0.16-security (ea77444750de45e036e0279bb0291144bf8e3688).
 
 CharacterFunctions::readDoubleValue accumulates the digits of an exponent into
 an int with no bound, so a number like "1e99999999999" overflows a signed int:
@@ -8,8 +8,10 @@ Stop accumulating at 100000; anything that large is out of double's range and
 already becomes inf or 0 just below. Applied by CMakeLists.txt via
 FetchContent PATCH_COMMAND.
 
+Flayr-Patch-Marker: modules/juce_core/text/juce_CharacterFunctions.h FLAYR_PATCH juce-double-exponent-overflow
+
 diff --git a/modules/juce_core/text/juce_CharacterFunctions.h b/modules/juce_core/text/juce_CharacterFunctions.h
-index 7a1edcd45..2401324fa 100644
+index 7a1edcd456..0cb319bfc1 100644
 --- a/modules/juce_core/text/juce_CharacterFunctions.h
 +++ b/modules/juce_core/text/juce_CharacterFunctions.h
 @@ -373,7 +373,9 @@ public:
@@ -17,7 +19,7 @@ index 7a1edcd45..2401324fa 100644
                  auto digit = (int) text.getAndAdvance() - '0';
  
 -                if (digit != 0 || exponent != 0)
-+                // Flayr patch: stop accumulating once the exponent is out of double's range
++                // FLAYR_PATCH juce-double-exponent-overflow: stop accumulating once the exponent is out of double's range
 +                // anyway; the unbounded version overflowed int (undefined behaviour).
 +                if ((digit != 0 || exponent != 0) && exponent < 100000)
                      exponent = (exponent * 10) + digit;

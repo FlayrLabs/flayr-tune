@@ -1,4 +1,4 @@
-Flayr Tune patch for JUCE 8.0.15 (91ad83ae34a81e0833b1a2b0866f54846370ae53).
+Flayr Tune patch for JUCE 8.0.16-security (ea77444750de45e036e0279bb0291144bf8e3688).
 
 Flayr Tune never touches the network, but juce_core always compiles in HTTP
 (WinINet on Windows, NSURLSession on macOS, raw sockets on Linux), the
@@ -17,8 +17,11 @@ stubbed to return false; Tune never calls it. Applied by CMakeLists.txt via
 FetchContent PATCH_COMMAND (cmake/ApplyPatch.cmake). git apply ignores this
 preamble.
 
+Flayr-Patch-Marker: modules/juce_core/juce_core.cpp FLAYR_PATCH juce-no-network
+Flayr-Patch-Marker: modules/juce_core/native/juce_BasicNativeHeaders.h FLAYR_PATCH juce-no-network
+
 diff --git a/modules/juce_core/juce_core.cpp b/modules/juce_core/juce_core.cpp
-index f09d1d575..18283a53c 100644
+index f09d1d5755..cd3458d475 100644
 --- a/modules/juce_core/juce_core.cpp
 +++ b/modules/juce_core/juce_core.cpp
 @@ -169,7 +169,9 @@
@@ -32,7 +35,7 @@ index f09d1d575..18283a53c 100644
  #include "network/juce_IPAddress.cpp"
  #include "streams/juce_BufferedInputStream.cpp"
  #include "streams/juce_FileInputSource.cpp"
-@@ -211,14 +213,22 @@
+@@ -211,14 +213,23 @@
  #include "native/juce_PlatformTimerListener.h"
  
  //==============================================================================
@@ -42,6 +45,7 @@ index f09d1d575..18283a53c 100644
 +  #error "FLAYR_NO_NETWORK needs JUCE_USE_CURL=0"
 + #endif
 + // Flayr patch: sockets, HTTP and interface enumeration are replaced by stubs that always fail.
++ // FLAYR_PATCH juce-no-network
 + #include "native/juce_Network_disabled.cpp"
 +#elif ! JUCE_WINDOWS && (! JUCE_ANDROID || __ANDROID_API__ >= 24)
   #include "native/juce_IPAddress_posix.h"
@@ -57,7 +61,7 @@ index f09d1d575..18283a53c 100644
   #include "native/juce_Strings_mac.mm"
   #include "native/juce_SharedCode_intel.h"
   #include "native/juce_SystemStats_mac.mm"
-@@ -228,7 +238,9 @@
+@@ -228,7 +239,9 @@
  
  //==============================================================================
  #elif JUCE_WINDOWS
@@ -68,7 +72,7 @@ index f09d1d575..18283a53c 100644
   #include "native/juce_Registry_windows.cpp"
   #include "native/juce_SystemStats_windows.cpp"
   #include "native/juce_Threads_windows.cpp"
-@@ -239,7 +251,9 @@
+@@ -239,7 +252,9 @@
  #elif JUCE_LINUX
   #include "native/juce_CommonFile_linux.cpp"
   #include "native/juce_Files_linux.cpp"
@@ -79,7 +83,7 @@ index f09d1d575..18283a53c 100644
   #if JUCE_USE_CURL
    #include "native/juce_Network_curl.cpp"
   #endif
-@@ -251,7 +265,9 @@
+@@ -251,7 +266,9 @@
  #elif JUCE_BSD
   #include "native/juce_CommonFile_linux.cpp"
   #include "native/juce_Files_linux.cpp"
@@ -91,7 +95,7 @@ index f09d1d575..18283a53c 100644
    #include "native/juce_Network_curl.cpp"
   #endif
 diff --git a/modules/juce_core/native/juce_BasicNativeHeaders.h b/modules/juce_core/native/juce_BasicNativeHeaders.h
-index a4d03b656..a2d90182e 100644
+index a4d03b656f..516d602b90 100644
 --- a/modules/juce_core/native/juce_BasicNativeHeaders.h
 +++ b/modules/juce_core/native/juce_BasicNativeHeaders.h
 @@ -145,9 +145,11 @@
@@ -99,7 +103,7 @@ index a4d03b656..a2d90182e 100644
    #pragma comment (lib, "kernel32.lib")
    #pragma comment (lib, "user32.lib")
 -  #pragma comment (lib, "wininet.lib")
-+  #if ! FLAYR_NO_NETWORK // Flayr patch: a leftover network call becomes a link error
++  #if ! FLAYR_NO_NETWORK // FLAYR_PATCH juce-no-network: a leftover network call becomes a link error
 +   #pragma comment (lib, "wininet.lib")
 +   #pragma comment (lib, "ws2_32.lib")
 +  #endif
@@ -110,7 +114,7 @@ index a4d03b656..a2d90182e 100644
    #pragma comment (lib, "winmm.lib")
 diff --git a/modules/juce_core/native/juce_Network_disabled.cpp b/modules/juce_core/native/juce_Network_disabled.cpp
 new file mode 100644
-index 000000000..e36eae0bc
+index 0000000000..e36eae0bca
 --- /dev/null
 +++ b/modules/juce_core/native/juce_Network_disabled.cpp
 @@ -0,0 +1,105 @@

@@ -14,25 +14,30 @@ option(FLAYR_TUNE_BUILD_TESTS "Build the DSP test suite" ON)
 option(FLAYR_TUNE_BUILD_FUZZERS "Build the ASan/UBSan fuzz targets (development only, never for releases)" OFF)
 
 include(FetchContent)
-set(FLAYR_JUCE_PATCHES
-    ${CMAKE_CURRENT_SOURCE_DIR}/patches/juce-no-network.patch
-    ${CMAKE_CURRENT_SOURCE_DIR}/patches/juce-xml-entity-overread.patch
-    ${CMAKE_CURRENT_SOURCE_DIR}/patches/juce-double-exponent-overflow.patch)
+set(FLAYR_JUCE_PATCHES)
+foreach(name no-network xml-entity-overread double-exponent-overflow vst3-private-state wrapper-state-checks
+             base64-declared-size)
+    list(APPEND FLAYR_JUCE_PATCHES ${CMAKE_CURRENT_SOURCE_DIR}/patches/juce-${name}.patch)
+endforeach()
 string(REPLACE ";" "|" FLAYR_JUCE_PATCHES "${FLAYR_JUCE_PATCHES}") # survives PATCH_COMMAND
 # Pinned to the commit, not the tag, so a moved tag can't change what gets built.
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG 91ad83ae34a81e0833b1a2b0866f54846370ae53 # 8.0.15
+    GIT_TAG ea77444750de45e036e0279bb0291144bf8e3688 # 8.0.16-security
     # Our patches to JUCE; the header of each explains it.
-    #  juce-no-network: compiles juce_core's HTTP, socket and interface-enumeration code
-    #    out when FLAYR_NO_NETWORK=1. Tune never uses the network.
-    #  juce-xml-entity-overread: fixes a heap over-read in the XML parser.
-    #  juce-double-exponent-overflow: fixes an int overflow parsing numbers like 1e99999999999.
+    #  no-network: compiles juce_core's HTTP, socket and interface-enumeration code out
+    #    when FLAYR_NO_NETWORK=1. Tune never uses the network.
+    #  xml-entity-overread: a heap over-read in the XML parser.
+    #  double-exponent-overflow: an int overflow parsing numbers like 1e99999999999.
+    #  vst3-private-state: the VST3 wrapper's own state trailer (wild read, stack overflow).
+    #  wrapper-state-checks: unchecked types and sizes in the AU and LV2 state paths.
+    #  base64-declared-size: base64 decoding allocated whatever size the text claimed.
     PATCH_COMMAND ${CMAKE_COMMAND} "-DPATCHES=${FLAYR_JUCE_PATCHES}" -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyPatch.cmake
 )
 FetchContent_MakeAvailable(JUCE)
 # A JUCE tree from elsewhere (FETCHCONTENT_SOURCE_DIR_JUCE) skips PATCH_COMMAND, and
-# without the patches FLAYR_NO_NETWORK would silently do nothing, so check them here.
+# without the patches FLAYR_NO_NETWORK would silently do nothing, so check them here,
+# by content (see cmake/ApplyPatch.cmake).
 execute_process(COMMAND ${CMAKE_COMMAND} "-DPATCHES=${FLAYR_JUCE_PATCHES}" -DCHECK_ONLY=ON
                         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyPatch.cmake
                 WORKING_DIRECTORY "${juce_SOURCE_DIR}" RESULT_VARIABLE flayr_patches_missing)
@@ -68,6 +73,16 @@ juce_add_plugin(FlayrTune
     # Keep the host's shortcuts (space = play) working while the editor is open.
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
     COPY_PLUGIN_AFTER_BUILD ${FLAYR_TUNE_COPY_AFTER_BUILD})
+
+# Leave out libraries nothing in the plug-in calls (JUCE links WebKit and DiscRecording
+# on macOS unconditionally) and code nothing references.
+if(APPLE)
+    target_link_options(FlayrTune INTERFACE -Wl,-dead_strip -Wl,-dead_strip_dylibs)
+elseif(MSVC)
+    target_link_options(FlayrTune INTERFACE $<$<CONFIG:Release>:/OPT:REF /OPT:ICF>)
+elseif(UNIX)
+    target_link_options(FlayrTune INTERFACE -Wl,--as-needed)
+endif()
 
 target_sources(FlayrTune PRIVATE
     Source/PluginProcessor.cpp
@@ -107,8 +122,23 @@ if(FLAYR_TUNE_BUILD_TESTS)
     target_link_libraries(plugin_test PRIVATE juce::juce_audio_utils juce::juce_recommended_config_flags)
     add_test(NAME plugin_test COMMAND plugin_test)
 
+    # The built VST3, loaded as a host would, against hostile wrapper state.
+    juce_add_console_app(vst3_host_test PRODUCT_NAME "vst3_host_test")
+    target_sources(vst3_host_test PRIVATE tests/vst3_host_test.cpp)
+    target_compile_definitions(vst3_host_test PRIVATE
+        JUCE_PLUGINHOST_VST3=1 JUCE_PLUGINHOST_AU=0 JUCE_PLUGINHOST_LV2=0 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(vst3_host_test PRIVATE juce::juce_audio_processors juce::juce_recommended_config_flags)
+    add_dependencies(vst3_host_test FlayrTune_VST3)
+    add_test(NAME vst3_host_test
+             COMMAND vst3_host_test "${CMAKE_BINARY_DIR}/FlayrTune_artefacts/$<CONFIG>/VST3/Flayr Tune.vst3")
+
+    # cmake/ApplyPatch.cmake judges a JUCE tree by content, even one inside this work tree.
+    add_test(NAME juce_patch_check
+             COMMAND ${CMAKE_COMMAND} -DJUCE_DIR=${juce_SOURCE_DIR} -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                     -DWORK=${CMAKE_CURRENT_BINARY_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/patch_check_test.cmake)
+
     # A hang is a failure too.
-    set_tests_properties(engine_test plugin_test PROPERTIES TIMEOUT 300)
+    set_tests_properties(engine_test plugin_test vst3_host_test juce_patch_check PROPERTIES TIMEOUT 300)
 endif()
 
 if(FLAYR_TUNE_BUILD_TOOLS)
@@ -148,7 +178,7 @@ extern \"C\" int LLVMFuzzerTestOneInput (const uint8_t*, size_t) { return 0; }" 
         target_link_options(${name} PRIVATE ${flayr_sanitizers})
     endfunction()
 
-    foreach(target fuzz_state fuzz_host)
+    foreach(target fuzz_state fuzz_host fuzz_vst3)
         if(FLAYR_HAVE_LIBFUZZER)
             flayr_fuzz_app(${target} tests/fuzz/${target}.cpp)
             target_compile_options(${target} PRIVATE -fsanitize=fuzzer-no-link)
@@ -161,7 +191,7 @@ extern \"C\" int LLVMFuzzerTestOneInput (const uint8_t*, size_t) { return 0; }" 
     endforeach()
     if(NOT FLAYR_HAVE_LIBFUZZER)
         # The driver reads the coverage counters; it doesn't need any of its own.
-        set_source_files_properties(tests/fuzz/fuzz_driver.cpp TARGET_DIRECTORY fuzz_state fuzz_host
+        set_source_files_properties(tests/fuzz/fuzz_driver.cpp TARGET_DIRECTORY fuzz_state fuzz_host fuzz_vst3
             PROPERTIES COMPILE_OPTIONS "-fno-sanitize-coverage=inline-8bit-counters")
     endif()
     flayr_fuzz_app(fuzz_make_corpus tests/fuzz/make_corpus.cpp)
