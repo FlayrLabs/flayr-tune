@@ -40,6 +40,7 @@ case "$(uname -s)" in
             for arch in $(lipo -archs "$f"); do
                 syms="$(nm -u -arch "$arch" "$f")"
                 echo "  $arch: $(wc -l <<< "$syms" | tr -d ' ') undefined symbols"
+                grep -qx '_malloc' <<< "$syms" || report "$arch: symbol listing looks wrong (no _malloc)"
                 bad="$(grep -E "^_($SOCKET_FNS)\$|NSURLSession|NSURLConnection|NSURLDownload|_CFHTTP|_CFSocket|_CFHost|_CFStreamCreatePairWithSocket|_CFNetwork|_nw_|OBJC_CLASS_\\\$_WK|WebView" <<< "$syms" || true)"
                 [[ -z "$bad" ]] || report "$arch imports: $(echo $bad)"
             done
@@ -53,7 +54,8 @@ case "$(uname -s)" in
         for f in "${binaries[@]}"; do
             echo "== $f"
             syms="$(nm -D --undefined-only "$f" | awk '{print $NF}' | sed 's/@.*//')"
-            echo "  $(wc -l <<< "$syms" | tr -d ' ') undefined symbols"
+            echo "  $(wc -l <<< "$syms" | tr -d ' ') undefined symbols; allowed, not networking: $(grep -xE 'socketpair|gethostname' <<< "$syms" | tr '\n' ' ')"
+            grep -qx 'malloc' <<< "$syms" || report "symbol listing looks wrong (no malloc)"
             bad="$(grep -xE "$SOCKET_FNS" <<< "$syms" || true)"
             [[ -z "$bad" ]] || report "imports: $(echo $bad)"
             libs="$( (readelf -d "$f" | grep NEEDED | grep -iE "$LIBS") || true)"
@@ -71,6 +73,7 @@ case "$(uname -s)" in
             imports="$("$dumpbin" -nologo -imports "$(cygpath -w "$f")" | tr -d '\r')"
             dlls="$(grep -iE '^ +[A-Za-z0-9_.-]+\.dll$' <<< "$imports" | tr -d ' ' | sort -fu)"
             echo "  imports from: $(echo $dlls)"
+            grep -qix 'KERNEL32.dll' <<< "$dlls" || report "import listing looks wrong (no KERNEL32.dll)"
             bad="$(grep -iwE "$LIBS" <<< "$dlls" || true)"
             [[ -z "$bad" ]] || report "imports from $(echo $bad)"
             check_strings "$f"
