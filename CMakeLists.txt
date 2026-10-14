@@ -79,6 +79,9 @@ juce_add_plugin(FlayrTune
     IS_MIDI_EFFECT FALSE
     # MIDI-controlled effect, so Logic can feed target notes via side-chain MIDI.
     AU_MAIN_TYPE kAudioUnitType_MusicEffect
+    # Ask a sandboxed host for nothing: JUCE's default resourceUsage requests network
+    # client access and read-write access to all files, and Tune needs neither.
+    SUPPRESS_AU_PLIST_RESOURCE_USAGE TRUE
     # Keep the host's shortcuts (space = play) working while the editor is open.
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
     COPY_PLUGIN_AFTER_BUILD ${FLAYR_TUNE_COPY_AFTER_BUILD})

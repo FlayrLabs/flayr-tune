@@ -13,12 +13,16 @@ and friends. With FLAYR_NO_NETWORK=1 this patch:
     any network call that slips back in is a link error rather than an import.
 
 Process::openEmailWithAttachments lives in the same native files and is
-stubbed to return false; Tune never calls it. Applied by CMakeLists.txt via
+stubbed to return false; Tune never calls it. On macOS, the OS version is read
+from SystemVersion.plist with dictionaryWithContentsOfFile instead of
+dictionaryWithContentsOfURL, so no *ContentsOfURL selector is left for
+scripts/check-no-network.sh to flag. Applied by CMakeLists.txt via
 FetchContent PATCH_COMMAND (cmake/ApplyPatch.cmake). git apply ignores this
 preamble.
 
 Flayr-Patch-Marker: modules/juce_core/juce_core.cpp FLAYR_PATCH juce-no-network
 Flayr-Patch-Marker: modules/juce_core/native/juce_BasicNativeHeaders.h FLAYR_PATCH juce-no-network
+Flayr-Patch-Marker: modules/juce_core/native/juce_SystemStats_mac.mm FLAYR_PATCH juce-no-network v2
 
 diff --git a/modules/juce_core/juce_core.cpp b/modules/juce_core/juce_core.cpp
 index f09d1d5755..cd3458d475 100644
@@ -223,3 +227,23 @@ index 0000000000..e36eae0bca
 +bool DatagramSocket::setEnablePortReuse (bool)                   { return false; }
 +
 +} // namespace juce
+diff --git a/modules/juce_core/native/juce_SystemStats_mac.mm b/modules/juce_core/native/juce_SystemStats_mac.mm
+index a40b7339d1..22171f839b 100644
+--- a/modules/juce_core/native/juce_SystemStats_mac.mm
++++ b/modules/juce_core/native/juce_SystemStats_mac.mm
+@@ -107,12 +107,15 @@ static String getOSXVersion()
+         {
+             const String systemVersionPlist ("/System/Library/CoreServices/SystemVersion.plist");
+ 
++           #if ! FLAYR_NO_NETWORK // FLAYR_PATCH juce-no-network v2: the file API is enough for a local file,
++                                  // and keeps a *ContentsOfURL selector out of the binary
+             if (@available (macOS 10.13, *))
+             {
+                 NSError* error = nullptr;
+                 return [NSDictionary dictionaryWithContentsOfURL: createNSURLFromFile (systemVersionPlist)
+                                                            error: &error];
+             }
++           #endif
+ 
+             return [NSDictionary dictionaryWithContentsOfFile: juceStringToNS (systemVersionPlist)];
+         }();
