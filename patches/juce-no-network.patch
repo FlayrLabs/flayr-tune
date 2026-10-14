@@ -16,13 +16,17 @@ Process::openEmailWithAttachments lives in the same native files and is
 stubbed to return false; Tune never calls it. On macOS, the OS version is read
 from SystemVersion.plist with dictionaryWithContentsOfFile instead of
 dictionaryWithContentsOfURL, so no *ContentsOfURL selector is left for
-scripts/check-no-network.sh to flag. Applied by CMakeLists.txt via
+scripts/check-no-network.sh to flag. On POSIX, ChildProcess::start and Linux's
+Process::openDocument (which starts a browser) fail instead of forking, so the
+plug-in can't start a program that would do the networking for it. Applied by CMakeLists.txt via
 FetchContent PATCH_COMMAND (cmake/ApplyPatch.cmake). git apply ignores this
 preamble.
 
 Flayr-Patch-Marker: modules/juce_core/juce_core.cpp FLAYR_PATCH juce-no-network
 Flayr-Patch-Marker: modules/juce_core/native/juce_BasicNativeHeaders.h FLAYR_PATCH juce-no-network
 Flayr-Patch-Marker: modules/juce_core/native/juce_SystemStats_mac.mm FLAYR_PATCH juce-no-network v2
+Flayr-Patch-Marker: modules/juce_core/native/juce_SharedCode_posix.h FLAYR_PATCH juce-no-network v3
+Flayr-Patch-Marker: modules/juce_core/native/juce_Files_linux.cpp FLAYR_PATCH juce-no-network v3
 
 diff --git a/modules/juce_core/juce_core.cpp b/modules/juce_core/juce_core.cpp
 index f09d1d5755..cd3458d475 100644
@@ -116,6 +120,29 @@ index a4d03b656f..516d602b90 100644
    #pragma comment (lib, "version.lib")
    #pragma comment (lib, "shlwapi.lib")
    #pragma comment (lib, "winmm.lib")
+diff --git a/modules/juce_core/native/juce_Files_linux.cpp b/modules/juce_core/native/juce_Files_linux.cpp
+index 9b54451516..e6909ce043 100644
+--- a/modules/juce_core/native/juce_Files_linux.cpp
++++ b/modules/juce_core/native/juce_Files_linux.cpp
+@@ -253,6 +253,10 @@ bool Process::openDocument (const String& fileName, const String& parameters)
+         return (fileName.replace (" ", "\\ ", false) + " " + parameters).trim();
+     }();
+ 
++   #if FLAYR_NO_NETWORK // FLAYR_PATCH juce-no-network v3: no process launching (this starts a browser)
++    ignoreUnused (cmdString);
++    return false;
++   #else
+     const char* const argv[] = { "/bin/sh", "-c", cmdString.toUTF8(), nullptr };
+ 
+     const auto cpid = fork();
+@@ -267,6 +271,7 @@ bool Process::openDocument (const String& fileName, const String& parameters)
+     }
+ 
+     return cpid >= 0;
++   #endif
+ }
+ 
+ void File::revealToUser() const
 diff --git a/modules/juce_core/native/juce_Network_disabled.cpp b/modules/juce_core/native/juce_Network_disabled.cpp
 new file mode 100644
 index 0000000000..e36eae0bca
@@ -227,6 +254,29 @@ index 0000000000..e36eae0bca
 +bool DatagramSocket::setEnablePortReuse (bool)                   { return false; }
 +
 +} // namespace juce
+diff --git a/modules/juce_core/native/juce_SharedCode_posix.h b/modules/juce_core/native/juce_SharedCode_posix.h
+index 4097e427aa..2d018e89ef 100644
+--- a/modules/juce_core/native/juce_SharedCode_posix.h
++++ b/modules/juce_core/native/juce_SharedCode_posix.h
+@@ -1117,6 +1117,10 @@ public:
+ 
+         int pipeHandles[2] = {};
+ 
++       #if FLAYR_NO_NETWORK // FLAYR_PATCH juce-no-network v3: no process launching either, so a
++                            // plug-in can't hand the network to curl & co; start() just fails.
++        ignoreUnused (pipeHandles, streamFlags);
++       #else
+         if (pipe (pipeHandles) == 0)
+         {
+             auto result = fork();
+@@ -1162,6 +1166,7 @@ public:
+                 close (pipeHandles[1]); // close the write handle
+             }
+         }
++       #endif
+     }
+ 
+     ~ActiveProcess()
 diff --git a/modules/juce_core/native/juce_SystemStats_mac.mm b/modules/juce_core/native/juce_SystemStats_mac.mm
 index a40b7339d1..22171f839b 100644
 --- a/modules/juce_core/native/juce_SystemStats_mac.mm

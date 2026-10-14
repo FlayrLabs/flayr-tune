@@ -685,6 +685,10 @@ int main()
         check (! udp.bindToPort (0) && udp.write ("192.0.2.1", 9, "x", 1) < 0, "no UDP socket");
         check (juce::IPAddress::getAllAddresses().isEmpty() && juce::MACAddress::getAllAddresses().isEmpty(),
                "no interface enumeration");
+       #if ! JUCE_WINDOWS
+        juce::ChildProcess child;
+        check (! child.start ("/bin/echo hello"), "no process launching (ChildProcess::start fails)");
+       #endif
     }
 
     std::printf ("\n%s (%d failures)\n", failures == 0 ? "ALL PASSED" : "FAILURES", failures);
