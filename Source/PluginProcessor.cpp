@@ -161,10 +161,13 @@ void FlayrTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     for (const auto meta : midi)
     {
         const auto msg = meta.getMessage();
-        if (msg.isNoteOn())
-            heldNotes[(size_t) msg.getNoteNumber()] = true;
-        else if (msg.isNoteOff())
-            heldNotes[(size_t) msg.getNoteNumber()] = false;
+        if (msg.isNoteOn() || msg.isNoteOff())
+        {
+            // AU and LV2 hand over raw bytes, so the note number can be anything up to 255.
+            const int note = msg.getNoteNumber();
+            if (juce::isPositiveAndBelow (note, (int) heldNotes.size()))
+                heldNotes[(size_t) note] = msg.isNoteOn();
+        }
         else if (msg.isAllNotesOff() || msg.isAllSoundOff())
             heldNotes.fill (false);
     }
