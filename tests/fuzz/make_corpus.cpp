@@ -1,5 +1,5 @@
 // Writes the seed corpora for the fuzz targets:
-//   fuzz_make_corpus <state dir> <host dir>
+//   fuzz_make_corpus <state dir> <host dir> [<vst3 dir>]
 // State seeds are real states from getStateInformation (default, every preset, small and
 // full-length PitchTracks, a 1.0-1.2 "throat" project) plus the hostile blobs from the
 // security fixes (entity expansion, deep nesting, NUL / BOM / UTF-16 tricks, NaN values,
@@ -87,9 +87,9 @@ struct Program
 
 int main (int argc, char** argv)
 {
-    if (argc != 3)
+    if (argc != 3 && argc != 4)
     {
-        std::fprintf (stderr, "usage: %s <state corpus dir> <host corpus dir>\n", argv[0]);
+        std::fprintf (stderr, "usage: %s <state corpus dir> <host corpus dir> [<vst3 corpus dir>]\n", argv[0]);
         return 2;
     }
     fuzz::initJuce();
@@ -257,6 +257,37 @@ int main (int argc, char** argv)
         for (int i = 0; i < 8; ++i)
             p.block (512, 0, 0).param (18, (uint16_t) ((i & 1) ? 65535 : 0));
         p.write ("live-toggle");
+    }
+
+    // VST3 wrapper states (fuzz_vst3, mode 0: raw component state with the JUCE trailer).
+    if (argc == 4)
+    {
+        const auto vst3Dir = juce::File::getCurrentWorkingDirectory().getChildFile (argv[3]);
+        vst3Dir.createDirectory();
+        auto saveVst3 = [&] (const juce::String& name, const juce::MemoryBlock& plugin, const juce::MemoryBlock& priv, juce::int64 declared)
+        {
+            juce::MemoryOutputStream c;
+            c.write (plugin.getData(), plugin.getSize());
+            c.writeInt64 (0);
+            c.write (priv.getData(), priv.getSize());
+            c.writeInt64 (declared);
+            c << "JUCEPrivateData";
+            save (vst3Dir, name, 0, c.getData(), c.getDataSize());
+        };
+        FlayrTuneProcessor p;
+        const auto plugin = stateOf (p);
+        juce::ValueTree t ("JUCEPrivateData");
+        t.setProperty ("Bypass", true, nullptr);
+        juce::MemoryOutputStream priv;
+        t.writeToStream (priv);
+        const auto pb = priv.getMemoryBlock();
+        saveVst3 ("vst3-genuine", plugin, pb, (juce::int64) pb.getSize());
+        saveVst3 ("vst3-wrap", plugin, {}, (juce::int64) 0x40000000);
+        saveVst3 ("vst3-negative", plugin, pb, -1);
+        juce::MemoryOutputStream deep;
+        for (int i = 0; i < 2000; ++i) { deep.write ("a", 2); deep.writeCompressedInt (0); deep.writeCompressedInt (1); }
+        saveVst3 ("vst3-deep-2000", plugin, deep.getMemoryBlock(), (juce::int64) deep.getDataSize());
+        save (vst3Dir, "vst3-no-trailer", 0, plugin.getData(), plugin.getSize());
     }
 
     std::printf ("wrote %d seeds to %s and %s\n", counter, stateDir.getFullPathName().toRawUTF8(), hostDir.getFullPathName().toRawUTF8());

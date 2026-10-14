@@ -81,18 +81,20 @@ jobs:
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
             -DFLAYR_TUNE_BUILD_FUZZERS=ON -DFLAYR_TUNE_BUILD_TESTS=OFF -DFLAYR_TUNE_COPY_AFTER_BUILD=OFF
           grep -q 'FLAYR_HAVE_LIBFUZZER:INTERNAL=1' build-fuzz/CMakeCache.txt
-          cmake --build build-fuzz --target fuzz_state fuzz_host fuzz_make_corpus --parallel 4
+          cmake --build build-fuzz --target fuzz_state fuzz_host fuzz_vst3 fuzz_make_corpus --parallel 4
 
       - name: Fuzz each target for 60 s
         working-directory: build-fuzz
         run: |
           A=RelWithDebInfo
-          ./fuzz_make_corpus_artefacts/$A/fuzz_make_corpus seeds/state seeds/host
-          mkdir -p corpus/state corpus/host artifacts
+          ./fuzz_make_corpus_artefacts/$A/fuzz_make_corpus seeds/state seeds/host seeds/vst3
+          mkdir -p corpus/state corpus/host corpus/vst3 artifacts
           ./fuzz_state_artefacts/$A/fuzz_state -max_total_time=60 -timeout=20 -max_len=65536 \
             -dict=../tests/fuzz/fuzz.dict -artifact_prefix=artifacts/ corpus/state seeds/state
           ./fuzz_host_artefacts/$A/fuzz_host -max_total_time=60 -timeout=20 \
             -artifact_prefix=artifacts/ corpus/host seeds/host
+          ./fuzz_vst3_artefacts/$A/fuzz_vst3 -max_total_time=60 -timeout=20 -max_len=1048576 \
+            -dict=../tests/fuzz/fuzz.dict -artifact_prefix=artifacts/ corpus/vst3 seeds/vst3
 
       - name: Upload crashing inputs
         if: failure()

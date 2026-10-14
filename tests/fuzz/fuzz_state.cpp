@@ -12,6 +12,7 @@
 //   3  a gzip stream; base64'd and placed in the state (fuzzes the decompressor)
 
 #include "fuzz_common.h"
+#include "../state_differential.h"
 
 extern "C" int LLVMFuzzerTestOneInput (const uint8_t* data, size_t size)
 {
@@ -46,6 +47,14 @@ extern "C" int LLVMFuzzerTestOneInput (const uint8_t* data, size_t size)
 
     p->setStateInformation (blob.getData(), (int) blob.getSize());
     fuzz::checkProcessor (*p);
+
+    // Differential oracle: if the pre-scan accepted it, JUCE's parse must be within limits.
+    const auto problem = differential::check (blob.getData(), (int) blob.getSize());
+    if (! problem.empty())
+    {
+        std::fprintf (stderr, "pre-scan accepted, but JUCE parsed: %s\n", problem.c_str());
+        fuzz::fail ("pre-scan and JUCE's parser disagree");
+    }
 
     // Whatever we accepted must save and load back to the same state, in an instance that
     // held something else before: a project that loads once but not after saving, or comes
