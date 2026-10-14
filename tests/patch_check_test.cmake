@@ -69,7 +69,7 @@ message(STATUS "PASS: patches applied and verified by content")
 # juce-no-network has markers in two files; revert one of them.
 upstream_copy("modules/juce_core/juce_core.cpp")
 run_apply(r4 -DCHECK_ONLY=ON)
-if(r4 EQUAL 0 OR NOT r4_log MATCHES "partly applied")
+if(r4 EQUAL 0 OR NOT r4_log MATCHES "partly[ \t\r\n]+applied")
     message(FATAL_ERROR "FAIL: a partly patched tree was not reported:\n${r4_log}")
 endif()
 message(STATUS "PASS: partly patched tree refused")
