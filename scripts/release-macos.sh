@@ -7,6 +7,11 @@
 #
 # Needs a "Developer ID Application" identity in the keychain and a notarytool
 # keychain profile (xcrun notarytool store-credentials <profile> ...).
+#
+# Only signs a tagged release: the checkout must be clean, HEAD must sit exactly on a
+# v<version> tag that matches CMakeLists.txt and the tag on GitHub, and the build runs
+# in a fresh clone of that tag with tests, tools and git hooks off. Nothing from the
+# working tree (local edits, untracked files, build dirs) reaches the signed bundle.
 set -euo pipefail
 
 IDENTITY="${IDENTITY:-Developer ID Application: Flayr Labs LLC (NRNU83UJ68)}"
@@ -14,12 +19,34 @@ NOTARY_PROFILE="${NOTARY_PROFILE:-flayr-notary}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(sed -n 's/^project(FlayrTune VERSION \([0-9.]*\).*/\1/p' "$ROOT/CMakeLists.txt")"
-BUILD="$ROOT/build-release-macos"
+TAG="v$VERSION"
 DIST="$ROOT/dist"
 DMG="$DIST/FlayrTune-$VERSION-macOS.dmg"
 
+die() { echo "error: $*" >&2; exit 1; }
+
+[[ -n "$VERSION" ]] || die "could not read the version from CMakeLists.txt"
+[[ -z "$(git -C "$ROOT" status --porcelain)" ]] || die "the working tree has uncommitted or untracked changes"
+HEAD_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+TAG_SHA="$(git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG^{commit}" || true)"
+[[ -n "$TAG_SHA" ]] || die "tag $TAG does not exist; tag the release commit first"
+[[ "$HEAD_SHA" == "$TAG_SHA" ]] || die "HEAD is not at $TAG (HEAD $HEAD_SHA, $TAG $TAG_SHA)"
+REMOTE_SHA="$(git -C "$ROOT" ls-remote origin "refs/tags/$TAG^{}" | cut -f1)"
+[[ -n "$REMOTE_SHA" ]] || REMOTE_SHA="$(git -C "$ROOT" ls-remote origin "refs/tags/$TAG" | cut -f1)"
+[[ "$REMOTE_SHA" == "$TAG_SHA" ]] || die "$TAG on origin (${REMOTE_SHA:-missing}) differs from the local tag; push it first"
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+SRC="$WORK/src"
+BUILD="$WORK/build"
+
+echo "==> Cloning $TAG ($TAG_SHA) into a clean directory"
+git -c core.hooksPath=/dev/null clone --quiet --depth 1 --branch "$TAG" --no-recurse-submodules "file://$ROOT" "$SRC"
+[[ "$(git -C "$SRC" rev-parse HEAD)" == "$TAG_SHA" ]] || die "the clean clone is not at $TAG"
+
 echo "==> Building Flayr Tune $VERSION (universal)"
-cmake -S "$ROOT" -B "$BUILD" -G Xcode -DFLAYR_TUNE_COPY_AFTER_BUILD=OFF -DFLAYR_TUNE_BUILD_TESTS=OFF >/dev/null
+cmake -S "$SRC" -B "$BUILD" -G Xcode \
+    -DFLAYR_TUNE_COPY_AFTER_BUILD=OFF -DFLAYR_TUNE_BUILD_TESTS=OFF -DFLAYR_TUNE_BUILD_TOOLS=OFF >/dev/null
 cmake --build "$BUILD" --config Release --target FlayrTune_AU FlayrTune_VST3 -- -quiet
 
 ART="$BUILD/FlayrTune_artefacts/Release"
@@ -43,7 +70,7 @@ xcrun stapler staple "$STAGE/Flayr Tune.vst3"
 echo "==> Building the DMG"
 ln -s "/Library/Audio/Plug-Ins/Components" "$STAGE/Drag AU here (Logic, GarageBand)"
 ln -s "/Library/Audio/Plug-Ins/VST3" "$STAGE/Drag VST3 here (Ableton, FL, Cubase, Reaper...)"
-cp "$ROOT/packaging/macos/Install.txt" "$STAGE/Install.txt"
+cp "$SRC/packaging/macos/Install.txt" "$STAGE/Install.txt"
 rm -f "$DMG"
 hdiutil create -volname "Flayr Tune $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
 codesign --force --timestamp --sign "$IDENTITY" "$DMG"
@@ -56,8 +83,8 @@ spctl --assess --type open --context context:primary-signature --verbose "$DMG"
 echo "==> Done: $DMG"
 
 if [[ "${1:-}" == "--upload" ]]; then
-    gh release upload "v$VERSION" "$DMG" --clobber --repo FlayrLabs/flayr-tune
-    echo "==> Uploaded to release v$VERSION"
+    gh release upload "$TAG" "$DMG" --clobber --repo FlayrLabs/flayr-tune
+    echo "==> Uploaded to release $TAG"
 
     # Checksums for every file on the release, so users can verify their download.
     sums_dir="$(mktemp -d)"
