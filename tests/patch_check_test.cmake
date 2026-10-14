@@ -36,7 +36,7 @@ function(upstream_copy path)
         file(REMOVE "${tree}/${path}")
     endif()
 endfunction()
-foreach(path IN LISTS touched)
+foreach(path IN LISTS touched ITEMS modules/juce_core/juce_core.h) # juce_core.h: "is this JUCE?"
     upstream_copy("${path}")
 endforeach()
 if(EXISTS "${tree}/.git")

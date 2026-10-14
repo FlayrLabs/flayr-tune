@@ -17,17 +17,18 @@ flag, never children.
 Applied by CMakeLists.txt via FetchContent PATCH_COMMAND.
 
 Flayr-Patch-Marker: modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp FLAYR_PATCH juce-vst3-private-state
+Flayr-Patch-Marker: modules/juce_audio_plugin_client/detail/juce_VST3PrivateState.h FLAYR_PATCH juce-vst3-private-state v2
 
 diff --git a/modules/juce_audio_plugin_client/detail/juce_VST3PrivateState.h b/modules/juce_audio_plugin_client/detail/juce_VST3PrivateState.h
 new file mode 100644
-index 0000000000..7f8b5d65ce
+index 0000000000..14df13df4f
 --- /dev/null
 +++ b/modules/juce_audio_plugin_client/detail/juce_VST3PrivateState.h
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,111 @@
 +/*
 +  ==============================================================================
 +
-+   Flayr patch (not part of upstream JUCE).
++   Flayr patch (not part of upstream JUCE). FLAYR_PATCH juce-vst3-private-state v2
 +
 +   The VST3 wrapper appends its own data to the plug-in's state:
 +
@@ -121,8 +122,11 @@ index 0000000000..7f8b5d65ce
 +            const auto start = in.getPosition();
 +            const auto marker = in.readByte();
 +
-+            if (name == "Bypass" && numBytes == 1 && (marker == 2 || marker == 3)) // var bool true / false
++            // var::writeToStream markers: 1 int (4 bytes follow), 2 true, 3 false.
++            if (name == "Bypass" && numBytes == 1 && (marker == 2 || marker == 3))
 +                result = (marker == 2);
++            else if (name == "Bypass" && numBytes == 5 && marker == 1)
++                result = (in.readInt() != 0);
 +
 +            in.setPosition (start + numBytes);
 +        }

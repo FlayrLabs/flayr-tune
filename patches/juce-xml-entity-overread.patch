@@ -5,24 +5,28 @@ it reports an error, carries on, and steps over that character. When the
 character is the string's terminating null (input ending in "&#x", "&#x4",
 ...), parsing continues past the end of the buffer: a heap over-read that a
 crafted project file could trigger in the host (found by tests/fuzz/fuzz_state
-with ASan; minimal input "<e>&#x"). Only step forward when not at the end.
+with ASan; minimal input "<e>&#x"). Stop at the end of the text instead
+(the same code as Flayr Chop's fix, so both plug-ins ship the same JUCE).
 
 Flayr Tune also refuses such blobs before parsing (isSafeStateBlob), so this
 is defence in depth. Applied by CMakeLists.txt via FetchContent PATCH_COMMAND.
 
-Flayr-Patch-Marker: modules/juce_core/xml/juce_XmlDocument.cpp FLAYR_PATCH juce-xml-entity-overread
+Flayr-Patch-Marker: modules/juce_core/xml/juce_XmlDocument.cpp FLAYR_PATCH juce-xml-entity-overread v2
 
 diff --git a/modules/juce_core/xml/juce_XmlDocument.cpp b/modules/juce_core/xml/juce_XmlDocument.cpp
-index 4d40e0b7c7..ed032b6d0b 100644
+index 4d40e0b7c7..55bc24659e 100644
 --- a/modules/juce_core/xml/juce_XmlDocument.cpp
 +++ b/modules/juce_core/xml/juce_XmlDocument.cpp
-@@ -718,7 +718,8 @@ void XmlDocument::readEntity (String& result)
-                 ++input;
-             }
+@@ -706,6 +706,12 @@ void XmlDocument::readEntity (String& result)
  
--            ++input;
-+            if (! input.isEmpty()) // FLAYR_PATCH juce-xml-entity-overread: never step over the terminating null
-+                ++input;
-         }
-         else if (input[0] >= '0' && input[0] <= '9')
-         {
+             while (input[0] != ';')
+             {
++                if (input[0] == 0) // FLAYR_PATCH juce-xml-entity-overread v2: hex entity at the end of the text: don't step past it
++                {
++                    setLastError ("unexpected end of input", true);
++                    return;
++                }
++
+                 auto hexValue = CharacterFunctions::getHexDigitValue (input[0]);
+ 
+                 if (hexValue < 0 || ++numChars > 8)

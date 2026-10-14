@@ -19,6 +19,13 @@ foreach(name no-network xml-entity-overread double-exponent-overflow vst3-privat
              base64-declared-size)
     list(APPEND FLAYR_JUCE_PATCHES ${CMAKE_CURRENT_SOURCE_DIR}/patches/juce-${name}.patch)
 endforeach()
+# The patch contents are part of the patch command, so editing a patch re-runs the step.
+set(flayr_patch_hashes "")
+foreach(patch IN LISTS FLAYR_JUCE_PATCHES)
+    file(SHA256 "${patch}" hash)
+    string(APPEND flayr_patch_hashes "${hash}")
+endforeach()
+string(SHA256 FLAYR_JUCE_PATCH_SET "${flayr_patch_hashes}")
 string(REPLACE ";" "|" FLAYR_JUCE_PATCHES "${FLAYR_JUCE_PATCHES}") # survives PATCH_COMMAND
 # Pinned to the commit, not the tag, so a moved tag can't change what gets built.
 FetchContent_Declare(JUCE
@@ -32,7 +39,8 @@ FetchContent_Declare(JUCE
     #  vst3-private-state: the VST3 wrapper's own state trailer (wild read, stack overflow).
     #  wrapper-state-checks: unchecked types and sizes in the AU and LV2 state paths.
     #  base64-declared-size: base64 decoding allocated whatever size the text claimed.
-    PATCH_COMMAND ${CMAKE_COMMAND} "-DPATCHES=${FLAYR_JUCE_PATCHES}" -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyPatch.cmake
+    PATCH_COMMAND ${CMAKE_COMMAND} "-DPATCHES=${FLAYR_JUCE_PATCHES}" -DPATCH_SET=${FLAYR_JUCE_PATCH_SET}
+                  -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyPatch.cmake
 )
 FetchContent_MakeAvailable(JUCE)
 # A JUCE tree from elsewhere (FETCHCONTENT_SOURCE_DIR_JUCE) skips PATCH_COMMAND, and
@@ -100,7 +108,7 @@ target_compile_definitions(FlayrTune PUBLIC
 
 target_link_libraries(FlayrTune
     PRIVATE
-        juce::juce_audio_utils
+        juce::juce_audio_processors
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -119,7 +127,7 @@ if(FLAYR_TUNE_BUILD_TESTS)
     target_include_directories(plugin_test PRIVATE Source)
     target_compile_definitions(plugin_test PRIVATE
         JucePlugin_Name="Flayr Tune" FLAYR_NO_NETWORK=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
-    target_link_libraries(plugin_test PRIVATE juce::juce_audio_utils juce::juce_recommended_config_flags)
+    target_link_libraries(plugin_test PRIVATE juce::juce_audio_processors juce::juce_recommended_config_flags)
     add_test(NAME plugin_test COMMAND plugin_test)
 
     # The built VST3, loaded as a host would, against hostile wrapper state.
@@ -148,7 +156,7 @@ if(FLAYR_TUNE_BUILD_TOOLS)
     target_include_directories(FlayrTuneSnapshot PRIVATE Source)
     target_compile_definitions(FlayrTuneSnapshot PRIVATE
         JucePlugin_Name="Flayr Tune" FLAYR_NO_NETWORK=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
-    target_link_libraries(FlayrTuneSnapshot PRIVATE juce::juce_audio_utils juce::juce_recommended_config_flags)
+    target_link_libraries(FlayrTuneSnapshot PRIVATE juce::juce_audio_processors juce::juce_recommended_config_flags)
 
     # Real-voice render: render in_mono_f32.wav out_prefix
     add_executable(render tools/render.cpp)
@@ -173,7 +181,7 @@ extern \"C\" int LLVMFuzzerTestOneInput (const uint8_t*, size_t) { return 0; }" 
         target_include_directories(${name} PRIVATE Source tests/fuzz)
         target_compile_definitions(${name} PRIVATE
             JucePlugin_Name="Flayr Tune" FLAYR_NO_NETWORK=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
-        target_link_libraries(${name} PRIVATE juce::juce_audio_utils juce::juce_recommended_config_flags)
+        target_link_libraries(${name} PRIVATE juce::juce_audio_processors juce::juce_recommended_config_flags)
         target_compile_options(${name} PRIVATE ${flayr_sanitizers})
         target_link_options(${name} PRIVATE ${flayr_sanitizers})
     endfunction()
