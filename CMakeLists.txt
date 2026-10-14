@@ -146,6 +146,15 @@ if(FLAYR_TUNE_BUILD_TESTS)
              COMMAND ${CMAKE_COMMAND} -DJUCE_DIR=${juce_SOURCE_DIR} -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
                      -DWORK=${CMAKE_CURRENT_BINARY_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/patch_check_test.cmake)
 
+    # The release's CI-asset verification (scripts/verify-release-assets.sh), against a fake gh.
+    find_program(FLAYR_BASH bash)
+    find_program(FLAYR_JQ jq)
+    find_program(FLAYR_SHASUM shasum)
+    if(NOT WIN32 AND FLAYR_BASH AND FLAYR_JQ AND FLAYR_SHASUM)
+        add_test(NAME release_verify_test COMMAND ${FLAYR_BASH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/release_verify_test.sh)
+        set_tests_properties(release_verify_test PROPERTIES TIMEOUT 120)
+    endif()
+
     # A hang is a failure too.
     set_tests_properties(engine_test plugin_test vst3_host_test juce_patch_check PROPERTIES TIMEOUT 300)
 endif()

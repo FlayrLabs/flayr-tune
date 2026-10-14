@@ -3,7 +3,8 @@
 # notarizes and staples it, and wraps it in a drag-to-install DMG.
 #
 #   scripts/release-macos.sh            # build dist/FlayrTune-<version>-macOS.dmg
-#   scripts/release-macos.sh --upload   # ...and attach it to the GitHub release v<version>
+#   scripts/release-macos.sh --upload   # ...and attach it, with SHA256SUMS.txt, to the draft release
+#                                       # v<version> (see scripts/verify-release-assets.sh)
 #
 # Needs a "Developer ID Application" identity in the keychain and a notarytool
 # keychain profile (xcrun notarytool store-credentials <profile> ...).
@@ -32,6 +33,21 @@ DIST="$ROOT/dist"
 DMG="$DIST/FlayrTune-$VERSION-macOS.dmg"
 
 die() { echo "error: $*" >&2; exit 1; }
+
+UPLOAD=0
+case "${1:-}" in
+    "") ;;
+    --upload) UPLOAD=1 ;;
+    *) die "unknown argument $1" ;;
+esac
+# Fail before the long build if the upload step couldn't run.
+if [[ "$UPLOAD" == 1 ]]; then
+    for tool in gh jq shasum; do command -v "$tool" >/dev/null || die "$tool is needed for --upload"; done
+    help="$(gh attestation verify --help 2>&1)" || die "gh has no 'attestation verify'; update gh"
+    for flag in --signer-workflow --source-ref --source-digest --deny-self-hosted-runners --cert-oidc-issuer; do
+        grep -q -- "$flag" <<< "$help" || die "gh does not support attestation verify $flag; update gh"
+    done
+fi
 
 overrides="$(env | grep -E '^(FETCHCONTENT_|CMAKE_|CTEST_|CXXFLAGS|CFLAGS|CPPFLAGS|LDFLAGS|OBJCFLAGS|OBJCXXFLAGS|CC|CXX|OBJC|OBJCXX|SDKROOT|MACOSX_DEPLOYMENT_TARGET|LIBRARY_PATH|CPATH|C_INCLUDE_PATH|CPLUS_INCLUDE_PATH|DYLD_)[A-Z_]*=' | cut -d= -f1 || true)"
 [[ -z "$overrides" ]] || die "build overrides are set in the environment, unset them first: $(echo $overrides)"
@@ -136,31 +152,29 @@ spctl --assess --type open --context context:primary-signature --verbose "$DMG"
 
 echo "==> Done: $DMG"
 
-if [[ "${1:-}" == "--upload" ]]; then
+if [[ "$UPLOAD" == 1 ]]; then
     REPO=FlayrLabs/flayr-tune
     # Only ever add to a draft: replacing files on a published release would swap what
     # people already downloaded and verified.
     [[ "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)" == "true" ]] \
         || die "release $TAG is already published (or missing); refusing to change its files"
-    gh release upload "$TAG" "$DMG" --clobber --repo "$REPO"
-    echo "==> Uploaded to release $TAG"
 
-    # Checksums only for files we can vouch for: the DMG we just built and notarized
-    # (byte-identical to the local copy), and CI builds whose provenance attestation
-    # verifies. Anything else on the draft stops the script.
+    # Verify the CI assets (strict provenance, bound to the tag's own release.yml run) and
+    # checksum exactly the verified bytes plus our DMG. Nothing is uploaded unless all of
+    # it passes. The verifier comes from the verified tag tree, not the working tree.
     sums_dir="$(mktemp -d)"
-    gh release download "$TAG" --repo "$REPO" --dir "$sums_dir" --pattern 'FlayrTune-*'
-    for asset in "$sums_dir"/FlayrTune-*; do
-        name="$(basename "$asset")"
-        if [[ "$name" == "$(basename "$DMG")" ]]; then
-            cmp -s "$asset" "$DMG" || die "$name on the release differs from the DMG just built"
-        else
-            gh attestation verify "$asset" --repo "$REPO" >/dev/null || die "$name has no valid build provenance attestation"
-        fi
-        echo "    verified $name"
-    done
-    (cd "$sums_dir" && shasum -a 256 FlayrTune-* > SHA256SUMS.txt && cat SHA256SUMS.txt)
-    gh release upload "$TAG" "$sums_dir/SHA256SUMS.txt" --clobber --repo "$REPO"
+    "$SRC/scripts/verify-release-assets.sh" "$TAG" "$TAG_SHA" "$VERSION" "$DMG" "$sums_dir" \
+        || die "release assets did not verify; nothing was uploaded"
+    cat "$sums_dir/SHA256SUMS.txt"
+
+    gh release upload "$TAG" "$DMG" "$sums_dir/SHA256SUMS.txt" --clobber --repo "$REPO"
+
+    # The release must now hold exactly what was checksummed.
+    assets="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets')"
+    while read -r sum name; do
+        [[ "$(jq -r --arg n "$name" '.[] | select(.name == $n) | .digest // empty' <<< "$assets")" == "sha256:$sum" ]] \
+            || die "$name on the draft no longer matches SHA256SUMS.txt; do not publish"
+    done < "$sums_dir/SHA256SUMS.txt"
     rm -rf "$sums_dir"
-    echo "==> Uploaded SHA256SUMS.txt"
+    echo "==> Uploaded $(basename "$DMG") and SHA256SUMS.txt to the draft release $TAG"
 fi
