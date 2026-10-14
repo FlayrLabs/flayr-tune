@@ -119,6 +119,37 @@ void FlayrTuneProcessor::prepareToPlay (double sampleRate, int)
     engine.prepare (sampleRate, juce::jmax (1, getTotalNumInputChannels()));
     setLatencySamples (engine.getLatencySamples (raw.live->load() > 0.5f));
     heldNotes.fill (false);
+
+    // Studio latency is the larger of the two modes; 0 if the rate is unsupported.
+    const int maxLatency = engine.getLatencySamples (false);
+    bypassDelay.setSize (juce::jmax (1, getTotalNumInputChannels()), maxLatency > 0 ? tune::nextPow2 (maxLatency + 1) : 0);
+    bypassDelay.clear();
+    bypassPos = 0;
+}
+
+void FlayrTuneProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    // The plug-in still reports its latency while bypassed, so delay the dry signal by the
+    // same amount instead of passing it through early.
+    const int latency = getLatencySamples();
+    const int length = bypassDelay.getNumSamples();
+    const int numCh = juce::jmin (buffer.getNumChannels(), bypassDelay.getNumChannels());
+    for (int c = getTotalNumInputChannels(); c < juce::jmin (getTotalNumOutputChannels(), buffer.getNumChannels()); ++c)
+        buffer.clear (c, 0, buffer.getNumSamples());
+    if (latency <= 0 || latency >= length || numCh <= 0)
+        return;
+    const int mask = length - 1;
+    for (int c = 0; c < numCh; ++c)
+    {
+        auto* io = buffer.getWritePointer (c);
+        auto* ring = bypassDelay.getWritePointer (c);
+        for (int i = 0, pos = bypassPos; i < buffer.getNumSamples(); ++i, pos = (pos + 1) & mask)
+        {
+            ring[pos] = io[i];
+            io[i] = ring[(pos - latency) & mask];
+        }
+    }
+    bypassPos = (bypassPos + buffer.getNumSamples()) & mask;
 }
 
 tune::Params FlayrTuneProcessor::readParams() const
@@ -209,11 +240,14 @@ void FlayrTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     engine.setTransport (playing, hostSample, trackArmed.load (std::memory_order_relaxed),
                          raw.graph->load() > 0.5f);
 
+    // Never trust the buffer to have as many channels as the buses (a host can pass 0).
     const int numIn = getTotalNumInputChannels();
-    for (int c = numIn; c < getTotalNumOutputChannels(); ++c)
+    for (int c = numIn; c < juce::jmin (getTotalNumOutputChannels(), buffer.getNumChannels()); ++c)
         buffer.clear (c, 0, buffer.getNumSamples());
 
-    engine.process (buffer.getArrayOfWritePointers(), juce::jmin (numIn, buffer.getNumChannels()), buffer.getNumSamples());
+    const int numCh = juce::jmin (numIn, buffer.getNumChannels());
+    if (numCh > 0)
+        engine.process (buffer.getArrayOfWritePointers(), numCh, buffer.getNumSamples());
 }
 
 //==============================================================================
@@ -245,24 +279,34 @@ const juce::Identifier kTrackTag ("PitchTrack");
 
 // Project files can come from anyone. JUCE's XML parser expands <!DOCTYPE>/<!ENTITY>
 // definitions and recurses once per nesting level, so a crafted blob can overflow the
-// stack (crashing the host) before we ever see the tree. This check runs first, over
-// exactly the bytes getXmlFromBinary() would parse, and never tries to understand
-// quotes or attributes, so it can't disagree with the parser in the unsafe direction:
+// stack (crashing the host) before we ever see the tree, and several of its paths take
+// quadratic time or allocate what the text asks for. This check runs first, over exactly
+// the bytes getXmlFromBinary() would parse, and never tries to understand quotes or
+// attributes, so it can't disagree with the parser in the unsafe direction:
+//  - at most kMaxStateBytes (5 MB; a full 30-minute PitchTrack saves to at most ~4.3 MB);
 //  - only plain ASCII (no NUL, no UTF-8 sequences that could decode to '<');
 //  - no "<!" at all, and "<?" only for the leading <?xml ...?> declaration;
-//  - at most kMaxXmlTags tags, counting every '<' (even one inside an attribute), so
-//    neither JUCE nor ValueTree::fromXml can ever recurse deeper than that;
-//  - a nesting estimate (+1 per '<', -1 per "</" or "/>") of at most kMaxXmlDepth;
+//  - at most kMaxXmlTags '<' (even inside an attribute). This is the real bound on
+//    nesting: JUCE and ValueTree::fromXml can never recurse deeper than that. (The
+//    nesting estimate below, +1 per '<' and -1 per "</" or "/>", is only a cheap early
+//    refusal: a "/>" in text lowers it without closing anything.)
+//  - no ':' anywhere: an attribute named "base64:<x>" makes ValueTree::fromXml decode
+//    and allocate whatever size the attribute claims;
+//  - at most kMaxXmlAttributes '=' and kMaxXmlEntities '&': JUCE appends to a String per
+//    entity and interns every attribute name in a global pool, both quadratic in count;
 //  - every '&' starts a complete reference: "&amp;", "&lt;", "&gt;", "&quot;", "&apos;"
-//    or "&#" + an optional x + 1-10 hex digits + ';'. JUCE 8.0.15 reads past the end of
+//    or "&#" + an optional x + 1-10 hex digits + ';'. JUCE 8.0.16 reads past the end of
 //    the buffer on a trailing "&#x" (patches/juce-xml-entity-overread.patch), and looks
 //    for the ';' of any other name by scanning the rest of the text, so a few MB of '&'
 //    took quadratic time and hung the host.
-// Our own state is ASCII, two levels deep and about 40 tags, so it always passes.
-constexpr uint32_t kXmlMagic = 0x21324356;       // AudioProcessor::copyXmlToBinary header
-constexpr int kMaxStateBytes = 16 * 1024 * 1024; // a full 30-minute PitchTrack: ~3.1 MB, ~4.4 MB if incompressible
-constexpr int kMaxXmlTags = 256;
+// Our own state is ASCII, two levels deep, about 40 tags and 70 attributes, no '&' and
+// no ':', so it always passes.
+constexpr uint32_t kXmlMagic = 0x21324356; // AudioProcessor::copyXmlToBinary header
+constexpr int kMaxStateBytes = FlayrTuneProcessor::kMaxStateBytes;
+constexpr int kMaxXmlTags = FlayrTuneProcessor::kMaxXmlTags;
 constexpr int kMaxXmlDepth = 8;
+constexpr int kMaxXmlAttributes = FlayrTuneProcessor::kMaxXmlAttributes;
+constexpr int kMaxXmlEntities = FlayrTuneProcessor::kMaxXmlEntities;
 
 bool isSafeStateBlob (const void* data, int sizeInBytes)
 {
@@ -290,7 +334,7 @@ bool isSafeStateBlob (const void* data, int sizeInBytes)
         i += 2;
     }
 
-    int tags = 0, depth = 0;
+    int tags = 0, depth = 0, attributes = 0, entities = 0;
     for (; i < length; ++i)
     {
         const auto c = text[i];
@@ -298,6 +342,8 @@ bool isSafeStateBlob (const void* data, int sizeInBytes)
             return false;
         if (c == '/' && i + 1 < length && text[i + 1] == '>')
             --depth;
+        if (c == ':' || (c == '=' && ++attributes > kMaxXmlAttributes) || (c == '&' && ++entities > kMaxXmlEntities))
+            return false;
         if (c == '&' && i + 1 < length && text[i + 1] == '#')
         {
             size_t j = i + 2;
@@ -403,6 +449,11 @@ void decodeTrack (tune::PitchTrack& t, const juce::String& data)
 }
 } // namespace
 
+bool FlayrTuneProcessor::isAcceptableState (const void* data, int sizeInBytes)
+{
+    return isSafeStateBlob (data, sizeInBytes);
+}
+
 void FlayrTuneProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
@@ -433,6 +484,19 @@ void FlayrTuneProcessor::getStateInformation (juce::MemoryBlock& destData)
 }
 
 void FlayrTuneProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    // Nothing may escape into the host: an allocation failure (or any other exception from
+    // JUCE) while loading a project leaves the current state as it is instead.
+    try
+    {
+        loadState (data, sizeInBytes);
+    }
+    catch (...)
+    {
+    }
+}
+
+void FlayrTuneProcessor::loadState (const void* data, int sizeInBytes)
 {
     if (! isSafeStateBlob (data, sizeInBytes))
         return;

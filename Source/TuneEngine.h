@@ -714,7 +714,9 @@ public:
 
     void process (float* const* io, int numCh, int numSamples)
     {
-        numCh = std::clamp (numCh, 1, chans);
+        if (io == nullptr || numCh <= 0 || numSamples <= 0) // e.g. a host's 0-channel buffer
+            return;
+        numCh = std::min (numCh, chans);
         if (! prepared) // never prepared, or the host asked for an unsupported rate
         {
             for (int c = 0; c < numCh; ++c)

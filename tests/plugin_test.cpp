@@ -2,8 +2,10 @@
 // Built with the plug-in sources (see CMakeLists.txt); run by ctest.
 
 #include "PluginProcessor.h"
+#include "state_differential.h"
 
 #include <cstdio>
+#include <cstring>
 #include <random>
 #include <string>
 
@@ -221,6 +223,84 @@ int main()
         setValue (p, "retune", 123.0f);
         juce::MemoryBlock huge (17 * 1024 * 1024, true);
         expectIgnored (huge, "17 MB blob refused");
+        expectIgnored (blobFromBytes ("<FlayrTune>" + param + std::string ((size_t) FlayrTuneProcessor::kMaxStateBytes, ' ')
+                                      + "</FlayrTune>"),
+                       "state over the cap refused");
+
+        // Found by review: attribute names "base64:<x>" are decoded by ValueTree::fromXml,
+        // which allocated whatever size the text claimed (std::bad_alloc escaped for -1).
+        for (const char* claim : { "-1.AAAA", "2000000000.A", "99999999999999999999.A" })
+            expectIgnored (blobFromBytes (std::string ("<FlayrTune><PARAM id=\"retune\" value=\"5\" base64:x=\"") + claim
+                                          + "\"/></FlayrTune>"),
+                           std::string ("base64: attribute claiming ") + claim + " refused");
+        expectIgnored (blobFromBytes ("<FlayrTune><PARAM id=\"retune\" value=\"5\"/><a:b/></FlayrTune>"), "any ':' refused");
+
+        // Found by review: quadratic time inside JUCE (a String append per entity, a global
+        // pool insert per attribute name). The caps keep the worst accepted input fast.
+        auto timed = [&p] (const std::string& xml)
+        {
+            auto b = blobFromBytes (xml);
+            const auto start = juce::Time::getMillisecondCounterHiRes();
+            p.setStateInformation (b.getData(), (int) b.getSize());
+            return juce::Time::getMillisecondCounterHiRes() - start;
+        };
+        auto amps = [] (int n) { return "<FlayrTune><PARAM id=\"retune\" value=\"5\" z=\"" + repeated ("&amp;", n) + "\"/></FlayrTune>"; };
+        auto names = [] (int n)
+        {
+            std::string s = "<FlayrTune><PARAM id=\"retune\" value=\"5\"";
+            for (int i = 0; i < n; ++i)
+                s += " q" + std::to_string (i) + "=''";
+            return s + "/></FlayrTune>";
+        };
+        expectIgnored (blobFromBytes (amps (257)), "257 '&' refused");
+        expectIgnored (blobFromBytes (names (511)), "513 '=' refused");
+        double worst = 0.0;
+        worst = std::max (worst, timed (amps (900000))); // was 174 s for 3.3M
+        worst = std::max (worst, timed (names (400000))); // was 155 s for 1.3M
+        setValue (p, "retune", 123.0f);
+        worst = std::max (worst, timed (amps (256)));
+        check (std::abs (value (p, "retune") - 5.0f) < 0.01f, "256 entities still load");
+        setValue (p, "retune", 123.0f);
+        worst = std::max (worst, timed (names (510)));
+        check (std::abs (value (p, "retune") - 5.0f) < 0.01f, "510 extra attributes still load");
+        setValue (p, "retune", 123.0f);
+        // The largest text an accepted state can hold, as one attribute value.
+        worst = std::max (worst, timed ("<FlayrTune><PARAM id=\"retune\" value=\"5\" z=\""
+                                        + std::string ((size_t) FlayrTuneProcessor::kMaxStateBytes - 200, 'x') + "\"/></FlayrTune>"));
+        check (std::abs (value (p, "retune") - 5.0f) < 0.01f, "a 5 MB attribute still loads");
+        setValue (p, "retune", 123.0f);
+        std::printf ("  slowest of these: %.0f ms\n", worst);
+        check (worst < 2000.0, "every one finishes within 2 s");
+
+        // The JUCE fix itself, for every caller (ValueTree::fromXml, the LV2 wrapper, ...).
+        {
+            juce::MemoryBlock m;
+            check (! m.fromBase64Encoding ("-1.AAAA") && ! m.fromBase64Encoding ("2000000000.A")
+                       && ! m.fromBase64Encoding ("99999999999999999999.A") && ! m.fromBase64Encoding ("x1.AAAA")
+                       && m.getSize() < 16,
+                   "patched fromBase64Encoding refuses impossible byte counts");
+            juce::MemoryBlock original ("Flayr Tune", 10), decoded;
+            check (decoded.fromBase64Encoding (original.toBase64Encoding()) && decoded == original,
+                   "and still decodes what it encodes");
+            juce::XmlElement e ("PARAM");
+            e.setAttribute ("base64:x", "2000000000.A");
+            const auto t = juce::ValueTree::fromXml (e);
+            check (t.isValid(), "ValueTree::fromXml with a lying base64: attribute: no huge allocation");
+        }
+
+        // Found by review: "/>" in text lowered the nesting estimate without closing
+        // anything; the tag cap is what bounds nesting, and loading keeps nothing nested.
+        {
+            const std::string deep = "<FlayrTune>" + param + repeated ("/>", 120) + repeated ("<a>", 120) + repeated ("</a>", 120)
+                                     + "</FlayrTune>";
+            auto b = blobFromBytes (deep);
+            p.setStateInformation (b.getData(), (int) b.getSize());
+            juce::MemoryBlock saved;
+            p.getStateInformation (saved);
+            auto xml = juce::AudioProcessor::getXmlFromBinary (saved.getData(), (int) saved.getSize());
+            check (xml != nullptr && xml->getChildByName ("a") == nullptr, "120 hidden levels: harmless, not saved back");
+            setValue (p, "retune", 123.0f);
+        }
 
         p.setStateInformation (good.getData(), (int) good.getSize());
         check (std::abs (value (p, "retune") - 5.0f) < 0.01f, "a well-formed state still loads");
@@ -293,18 +373,31 @@ int main()
     {
         std::puts ("A full 30-minute PitchTrack round-trips under the size cap");
         FlayrTuneProcessor a;
+        // Worst case for the size cap: every float a random bit pattern within 0..127 (as
+        // close to incompressible as decodeTrack accepts) and random edit modes.
         std::mt19937 rng (7);
-        std::uniform_real_distribution<float> note (36.0f, 84.0f);
+        auto randomNote = [&rng]
+        {
+            for (;;)
+            {
+                const uint32_t bits = rng() & 0x7fffffffu;
+                float f;
+                std::memcpy (&f, &bits, sizeof (f));
+                if (f <= 127.0f)
+                    return f;
+            }
+        };
         for (int i = 0; i < tune::PitchTrack::kCapacity; ++i)
         {
-            a.track.setInput (i, note (rng));
-            a.track.setTarget (i, note (rng), (i & 1) ? tune::PitchTrack::kExact : tune::PitchTrack::kNote);
+            a.track.setInput (i, randomNote());
+            a.track.setTarget (i, randomNote(), (rng() & 1) ? tune::PitchTrack::kExact : tune::PitchTrack::kNote);
         }
         setValue (a, "retune", 77.0f);
         juce::MemoryBlock state;
         a.getStateInformation (state);
-        std::printf ("  saved state: %.2f MB\n", (double) state.getSize() / (1024.0 * 1024.0));
-        check (state.getSize() < 8u * 1024 * 1024, "worst-case state leaves 2x headroom under the 16 MB cap");
+        std::printf ("  worst-case saved state: %.2f MB (cap %.2f MB)\n", (double) state.getSize() / (1024.0 * 1024.0),
+                     FlayrTuneProcessor::kMaxStateBytes / (1024.0 * 1024.0));
+        check (state.getSize() < (size_t) FlayrTuneProcessor::kMaxStateBytes * 9 / 10, "worst-case state fits the cap with 10% to spare");
 
         FlayrTuneProcessor b;
         b.setStateInformation (state.getData(), (int) state.getSize());
@@ -440,6 +533,131 @@ int main()
         p.prepareToPlay (48000.0, 512);
         bool finite;
         check (play (p, 1.0, finite) > 0.05f && finite, "back to normal at 48 kHz");
+    }
+
+    {
+        std::puts ("Bypass keeps the reported latency");
+        FlayrTuneProcessor p;
+        p.prepareToPlay (48000.0, 256);
+        const int latency = p.getLatencySamples();
+        juce::MidiBuffer m;
+        int heardAt = -1;
+        for (int block = 0; block < 64 && heardAt < 0; ++block)
+        {
+            juce::AudioBuffer<float> b (2, 256);
+            b.clear();
+            if (block == 0)
+            {
+                b.setSample (0, 0, 1.0f);
+                b.setSample (1, 0, 1.0f);
+            }
+            p.processBlockBypassed (b, m);
+            for (int i = 0; i < 256; ++i)
+                if (b.getSample (0, i) > 0.5f && b.getSample (1, i) > 0.5f)
+                    heardAt = block * 256 + i;
+        }
+        std::printf ("  latency %d, impulse out at %d\n", latency, heardAt);
+        check (latency > 0 && heardAt == latency, "bypassed audio is delayed by exactly the reported latency");
+        p.prepareToPlay (0.0, 256); // unsupported rate: latency 0, plain pass-through
+        juce::AudioBuffer<float> b (2, 16);
+        b.clear();
+        b.setSample (0, 3, 1.0f);
+        p.processBlockBypassed (b, m);
+        check (b.getSample (0, 3) == 1.0f, "no latency: bypass passes audio straight through");
+    }
+
+    {
+        // Differential: whatever the pre-scan accepts must be within its limits as JUCE's
+        // XmlDocument and ValueTree::fromXml actually parse it (elements, depth, attributes,
+        // names, bytes), for tricky inputs and for seeded mutants of them.
+        std::puts ("Pre-scan vs JUCE's parser (differential)");
+        const std::string p = "<PARAM id=\"retune\" value=\"5\"/>";
+        const std::vector<std::string> tricky {
+            "<FlayrTune>" + p + "</FlayrTune>",
+            "<FlayrTune>&AMP;&Lt;&GT;&QUOT;&aPoS;" + p + "</FlayrTune>",          // entity case variants
+            "<FlayrTune>&#X3C;a&#x3e;&#60;b&#62;" + p + "</FlayrTune>",          // references encoding '<' '>'
+            "<FlayrTune a=\"&#58;&#x3A;\">&#58;" + p + "</FlayrTune>",          // references encoding ':'
+            "<FlayrTune><PARAM id=\"retune\" value=\"5\" base64&#58;x=\"-1.AAAA\"/></FlayrTune>",
+            "<FlayrTune><PARAM id=\"retune\" value=\"5\" base64:x=\"2000000000.A\"/></FlayrTune>",
+            "<FlayrTune><x:PARAM id=\"retune\" value=\"5\"/></FlayrTune>",
+            "\xEF\xBB\xBF<FlayrTune>" + p + "</FlayrTune>",                      // UTF-8 BOM
+            "\xFE\xFF<FlayrTune>" + p + "</FlayrTune>",                           // UTF-16 BOM
+            "  \r\n\t<?xml version=\"1.0\"?><FlayrTune>" + p + "</FlayrTune>",  // whitespace before <?xml
+            "<?xml version=\"1.0\"?>\r\n<FlayrTune\r\n\tx\r=\n'1'\t>" + p + "</FlayrTune\n>",
+            "<FlayrTune>\r\n<PARAM\tid\n=\r\"retune\"\tvalue='5'\n/>\r\n</FlayrTune>",
+            "<FlayrTune " + std::string (200, ' ') + "a=\"1\"" + std::string (200, '\t') + ">" + p + "</FlayrTune>",
+            "<FlayrTune>" + p + "</FlayrTune>" + std::string (1, '\0') + repeated ("<a>", 300),
+            "<FlayrTune>" + repeated ("<a x='/>'>", 100) + repeated ("</a>", 100) + "</FlayrTune>",
+            "<FlayrTune>" + repeated ("/>", 200) + repeated ("<a>", 200) + repeated ("</a>", 200) + "</FlayrTune>",
+            "<FlayrTune>" + repeated ("<a/>", 255) + "</FlayrTune>",
+            "<FlayrTune>" + repeated ("<a b='' c=''/>", 170) + "</FlayrTune>",
+            "<FlayrTune>" + repeated ("&#x10FFFF;", 250) + "</FlayrTune>",
+            "<FlayrTune><![CDATA[<a><b>]]>" + p + "</FlayrTune>",
+            "<FlayrTune><!-- <a> -->" + p + "</FlayrTune>",
+            "<FlayrTune a='<' b=\"<\" c='&lt;'>" + p + "</FlayrTune>",
+            "<FlayrTune>" + p + "<PARAM id='x' value='" + std::string (4 * 1024 * 1024, 'v') + "'/></FlayrTune>",
+        };
+        std::vector<juce::MemoryBlock> blobs;
+        for (const auto& t : tricky)
+        {
+            blobs.push_back (blobFromBytes (t));
+            blobs.push_back (blobFromBytes (t, (int) t.size() / 2));       // declared length shorter than the data
+            auto longer = blobFromBytes (t);
+            static_cast<uint32_t*> (longer.getData())[1] = (uint32_t) t.size() + 1; // covers the terminating NUL
+            blobs.push_back (longer);
+        }
+        int accepted = 0, problems = 0;
+        double slowest = 0.0;
+        auto examine = [&] (const juce::MemoryBlock& b, const std::string& what)
+        {
+            if (! FlayrTuneProcessor::isAcceptableState (b.getData(), (int) b.getSize()))
+                return;
+            ++accepted;
+            const auto parsed = differential::parse (b.getData(), (int) b.getSize());
+            slowest = std::max (slowest, parsed.parseMs);
+            const auto bad = differential::limitsViolated (parsed);
+            if (! bad.empty() && problems++ < 5)
+                std::printf ("  accepted but %s: %s\n", bad.c_str(), what.c_str());
+        };
+        for (size_t i = 0; i < blobs.size(); ++i)
+            examine (blobs[i], "tricky #" + std::to_string (i / 3));
+
+        // Seeded mutants: splice tokens that change how JUCE reads the text.
+        const std::vector<std::string> tokens { "<", ">", "/>", "</", "<a>", "</a>", "'", "\"", "=", " ", "\t", "\r\n", "&amp;",
+                                                "&AMP;", "&#60;", "&#x3C;", "&#58;", ":", "base64:", "<?", "?>", "<!", "\0",
+                                                "\xC0\xBC", "x=''", "<a x='/>'>", "&#", ";" };
+        std::mt19937 rng (20261014);
+        for (int n = 0; n < 40000; ++n)
+        {
+            std::string t = tricky[rng() % (tricky.size() - 1)]; // not the 4 MB one
+            for (int k = 1 + (int) (rng() % 6); k > 0; --k)
+            {
+                const auto at = t.empty() ? 0 : rng() % (t.size() + 1);
+                switch (rng() % 3)
+                {
+                    case 0: t.insert (at, tokens[rng() % tokens.size()]); break;
+                    case 1: if (at < t.size()) t.erase (at, 1 + rng() % 8); break;
+                    default: if (at < t.size()) t[at] = tokens[rng() % tokens.size()][0]; break;
+                }
+            }
+            examine (blobFromBytes (t), "mutant " + std::to_string (n));
+        }
+        std::printf ("  %zu tricky blobs and 40000 mutants: %d accepted, slowest parse %.1f ms\n", blobs.size(), accepted, slowest);
+        check (problems == 0, "everything accepted is within the limits as JUCE parses it");
+        check (accepted > 100, "and the comparison actually ran on accepted input");
+    }
+
+    {
+        // Found by review: a host buffer with 0 channels was dereferenced as channel 0.
+        std::puts ("Buffers with no channels or samples");
+        FlayrTuneProcessor p;
+        p.prepareToPlay (48000.0, 512);
+        juce::MidiBuffer m;
+        juce::AudioBuffer<float> none (0, 64), empty (2, 0), one (1, 64);
+        p.processBlock (none, m);
+        p.processBlock (empty, m);
+        p.processBlock (one, m); // fewer channels than the stereo buses
+        check (true, "0-channel, 0-sample and 1-of-2-channel buffers: no crash");
     }
 
     {

@@ -600,6 +600,17 @@ int main()
     }
 
     {
+        std::puts ("process() with no channels or samples");
+        auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
+        e.prepare (48000.0, 2);
+        float* none[1] = { nullptr };
+        e.process (none, 0, 64);
+        e.process (nullptr, 2, 64);
+        e.process (none, 1, 0);
+        check (true, "0 channels, null channel array, 0 samples: no crash");
+    }
+
+    {
         std::puts ("process() before prepare()");
         auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
         auto y = run (e, voice (sr, 0.1, [&] (double) { return a3; }));
