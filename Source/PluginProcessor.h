@@ -64,6 +64,9 @@ private:
         std::array<std::atomic<float>*, 12> removed;
     } raw;
 
+    // Parameters a preset sets, looked up once so setCurrentProgram() doesn't allocate.
+    std::array<juce::RangedAudioParameter*, 8> presetTargets {};
+
     std::array<bool, 128> heldNotes {};
     int currentProgram = 0;
 

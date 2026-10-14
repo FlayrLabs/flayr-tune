@@ -37,6 +37,11 @@ FlayrTuneProcessor::FlayrTuneProcessor()
     for (int pc = 0; pc < 12; ++pc)
         raw.removed[(size_t) pc] = get (removeId (pc));
 
+    // Same order as the values setCurrentProgram() applies.
+    size_t i = 0;
+    for (auto* id : { "retune", "humanize", "flex", "natvib", "formantShift", "transpose", "vibDepth", "formant" })
+        presetTargets[i++] = dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (id));
+
     startTimerHz (10);
 }
 
@@ -222,19 +227,12 @@ void FlayrTuneProcessor::setCurrentProgram (int index)
     currentProgram = index;
     const auto& pr = kPresets[(size_t) index];
 
-    auto set = [this] (const char* id, float value)
-    {
-        if (auto* param = apvts.getParameter (id))
-            param->setValueNotifyingHost (param->convertTo0to1 (value));
-    };
-    set ("retune", pr.retune);
-    set ("humanize", pr.humanize);
-    set ("flex", pr.flex);
-    set ("natvib", pr.natVib);
-    set ("formantShift", pr.formantShift);
-    set ("transpose", pr.transpose);
-    set ("vibDepth", pr.vibDepth);
-    set ("formant", pr.formant ? 1.0f : 0.0f);
+    // Hosts may call this from the audio thread, so no lookups by name (they allocate).
+    const std::array<float, 8> values { pr.retune, pr.humanize, pr.flex, pr.natVib, pr.formantShift,
+                                        pr.transpose, pr.vibDepth, pr.formant ? 1.0f : 0.0f };
+    for (size_t i = 0; i < values.size(); ++i)
+        if (auto* param = presetTargets[i])
+            param->setValueNotifyingHost (param->convertTo0to1 (values[i]));
 }
 
 namespace
