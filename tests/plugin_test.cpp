@@ -17,16 +17,28 @@ static void check (bool ok, const std::string& what)
 }
 
 // The layout AudioProcessor::copyXmlToBinary writes: magic, length, text, terminating zero.
-static juce::MemoryBlock blobFromText (const juce::String& text)
+// `declaredLength` < 0 means the real length.
+static juce::MemoryBlock blobFromBytes (const std::string& bytes, int declaredLength = -1)
 {
     juce::MemoryBlock b;
     juce::MemoryOutputStream out (b, false);
     out.writeInt (0x21324356);
-    out.writeInt ((int) text.getNumBytesAsUTF8());
-    out.write (text.toRawUTF8(), text.getNumBytesAsUTF8());
+    out.writeInt (declaredLength < 0 ? (int) bytes.size() : declaredLength);
+    out.write (bytes.data(), bytes.size());
     out.writeByte (0);
     out.flush();
     return b;
+}
+
+static juce::MemoryBlock blobFromText (const juce::String& text) { return blobFromBytes (text.toStdString()); }
+
+static std::string repeated (const std::string& s, int n)
+{
+    std::string r;
+    r.reserve (s.size() * (size_t) n);
+    for (int i = 0; i < n; ++i)
+        r += s;
+    return r;
 }
 
 static float value (FlayrTuneProcessor& p, const char* id) { return p.apvts.getRawParameterValue (id)->load(); }
@@ -122,7 +134,51 @@ int main()
         auto badLength = good;
         static_cast<uint32_t*> (badLength.getData())[1] = 0x7fffffff;
         expectIgnored (badLength, "length beyond the data refused");
-        expectIgnored (blobFromText ("<FlayrTune><PARAM id=\"retune\" value=\"5\"/>"), "unbalanced tags refused");
+        auto expectNoCrash = [&p] (const juce::MemoryBlock& b, const std::string& what)
+        {
+            p.setStateInformation (b.getData(), (int) b.getSize());
+            check (true, what); // reaching this line is the test
+            setValue (p, "retune", 123.0f);
+        };
+        expectNoCrash (blobFromText ("<FlayrTune><PARAM id=\"retune\" value=\"5\"/>"), "unbalanced tags: no crash");
+
+        // The scan never interprets quotes, so these must not fool it into missing depth.
+        const std::string param = "<PARAM id=\"retune\" value=\"5\"/>";
+        expectIgnored (blobFromBytes ("<FlayrTune>" + param + "<PARAM id=\"x\" value=\"<<<<<<<<<<\"/></FlayrTune>"),
+                       "'<' inside attribute values counts as nesting");
+        expectNoCrash (blobFromBytes ("<FlayrTune><PARAM id=\"retune\" value=\"5\" x=\"a>b>c\"/></FlayrTune>"),
+                       "'>' inside an attribute: no crash");
+        expectIgnored (blobFromBytes ("<FlayrTune><PARAM id=\"retune value=\"5\"/>" + repeated ("<a>", 100000)
+                                      + repeated ("</a>", 100000) + "</FlayrTune>"),
+                       "unterminated quote before deep nesting refused");
+        expectIgnored (blobFromBytes ("<FlayrTune>" + repeated ("<a x=\"/>/>/>/>/>/>/>/>/>/>\">", 100000)
+                                      + repeated ("</a>", 100000) + "</FlayrTune>"),
+                       "'/>' inside attribute strings can't hide 100,000 levels (tag cap)");
+        // Under the tag cap, "/>" in attributes can hide depth from the estimate, but JUCE
+        // then recurses at most 256 levels, which is harmless.
+        expectNoCrash (blobFromBytes ("<FlayrTune>" + repeated ("<a x=\"/>/>\">", 200) + repeated ("</a>", 200)
+                                      + "</FlayrTune>"),
+                       "hidden depth bounded by the tag cap: no crash");
+        expectIgnored (blobFromBytes ("<FlayrTune>" + param + "</FlayrTune>" + std::string (1, '\0')
+                                      + repeated ("<a>", 100000) + repeated ("</a>", 100000)),
+                       "NUL inside the declared length refused");
+        const std::string small = "<FlayrTune>" + param + "</FlayrTune>";
+        auto trailing = blobFromBytes (small + repeated ("<a>", 1000000), (int) small.size());
+        p.setStateInformation (trailing.getData(), (int) trailing.getSize());
+        check (std::abs (value (p, "retune") - 5.0f) < 0.01f, "nesting past the declared length is never parsed");
+        setValue (p, "retune", 123.0f);
+        expectIgnored (blobFromBytes ("\xEF\xBB\xBF" + small), "UTF-8 BOM refused (state is plain ASCII)");
+        expectIgnored (blobFromBytes (std::string ("<\0F\0l\0a\0y\0r\0T\0u\0n\0e\0>\0", 22)), "UTF-16 refused");
+        expectIgnored (blobFromBytes ("<FlayrTune>" + repeated ("\xC0\xBC" "a>", 100000) + "</FlayrTune>"),
+                       "overlong UTF-8 '<' refused");
+        expectIgnored (blobFromBytes ("<FlayrTune><?pi x?>" + param + "</FlayrTune>"), "'<?' after the declaration refused");
+        expectIgnored (blobFromBytes ("<?xml version=\"1.0\"" + small), "unterminated declaration refused");
+        expectIgnored (blobFromBytes ("<?xml version=\"1.0\" \xC0\xBE<!DOCTYPE x>?>" + small),
+                       "non-ASCII inside the declaration refused");
+        auto declared = blobFromBytes ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>" + small);
+        p.setStateInformation (declared.getData(), (int) declared.getSize());
+        check (std::abs (value (p, "retune") - 5.0f) < 0.01f, "a leading <?xml?> declaration is accepted");
+        setValue (p, "retune", 123.0f);
         juce::MemoryBlock huge (17 * 1024 * 1024, true);
         expectIgnored (huge, "17 MB blob refused");
 

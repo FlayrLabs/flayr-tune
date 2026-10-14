@@ -241,11 +241,18 @@ const juce::Identifier kTrackTag ("PitchTrack");
 
 // Project files can come from anyone. JUCE's XML parser expands <!DOCTYPE>/<!ENTITY>
 // definitions and recurses once per nesting level, so a crafted blob can overflow the
-// stack (crashing the host) before we ever see the tree. Our own state is flat
-// (FlayrTune > PARAM / PitchTrack) and never contains "<!", so anything else is refused
-// before it reaches the parser.
+// stack (crashing the host) before we ever see the tree. This check runs first, over
+// exactly the bytes getXmlFromBinary() would parse, and never tries to understand
+// quotes or attributes, so it can't disagree with the parser in the unsafe direction:
+//  - only plain ASCII (no NUL, no UTF-8 sequences that could decode to '<');
+//  - no "<!" at all, and "<?" only for the leading <?xml ...?> declaration;
+//  - at most kMaxXmlTags tags, counting every '<' (even one inside an attribute), so
+//    neither JUCE nor ValueTree::fromXml can ever recurse deeper than that;
+//  - a nesting estimate (+1 per '<', -1 per "</" or "/>") of at most kMaxXmlDepth.
+// Our own state is ASCII, two levels deep and about 40 tags, so it always passes.
 constexpr uint32_t kXmlMagic = 0x21324356;       // AudioProcessor::copyXmlToBinary header
 constexpr int kMaxStateBytes = 16 * 1024 * 1024; // a full 30-minute PitchTrack: ~3.1 MB, ~4.4 MB if incompressible
+constexpr int kMaxXmlTags = 256;
 constexpr int kMaxXmlDepth = 8;
 
 bool isSafeStateBlob (const void* data, int sizeInBytes)
@@ -255,63 +262,46 @@ bool isSafeStateBlob (const void* data, int sizeInBytes)
     const auto* bytes = static_cast<const uint8_t*> (data);
     if (juce::ByteOrder::littleEndianInt (bytes) != kXmlMagic)
         return false;
+    // getXmlFromBinary parses min (size - 8, length) bytes, stopping early at a NUL.
     const auto length = (size_t) juce::ByteOrder::littleEndianInt (bytes + 4);
     if (length == 0 || length > (size_t) sizeInBytes - 8)
         return false;
+    const auto* text = bytes + 8;
 
-    const auto* text = reinterpret_cast<const char*> (bytes + 8);
-    int depth = 0;
-    for (size_t i = 0; i < length; ++i)
+    size_t i = 0;
+    if (length >= 5 && std::memcmp (text, "<?xml", 5) == 0)
     {
-        if (text[i] == 0)
-            return false;
-        if (text[i] != '<')
-            continue;
-        if (i + 1 >= length || text[i + 1] == '!') // DOCTYPE, ENTITY, comments, CDATA
-            return false;
-        if (text[i + 1] == '?') // the <?xml ...?> declaration
+        for (;; ++i)
         {
-            size_t j = i + 2;
-            while (j + 1 < length && ! (text[j] == '?' && text[j + 1] == '>'))
-                ++j;
-            if (j + 1 >= length)
+            if (i + 1 >= length || text[i] == 0 || text[i] >= 0x80)
                 return false;
-            i = j + 1;
-            continue;
-        }
-
-        // Walk to the end of the tag, skipping quoted attribute values.
-        char quote = 0;
-        size_t j = i + 1;
-        for (; j < length; ++j)
-        {
-            const char c = text[j];
-            if (c == 0)
-                return false;
-            if (quote != 0)
-                quote = c == quote ? 0 : quote;
-            else if (c == '"' || c == '\'')
-                quote = c;
-            else if (c == '>')
+            if (text[i] == '?' && text[i + 1] == '>')
                 break;
-            else if (c == '<')
-                return false;
         }
-        if (j >= length)
-            return false;
-
-        if (text[i + 1] == '/')
-        {
-            if (--depth < 0)
-                return false;
-        }
-        else if (text[j - 1] != '/' && ++depth > kMaxXmlDepth)
-        {
-            return false;
-        }
-        i = j;
+        i += 2;
     }
-    return depth == 0;
+
+    int tags = 0, depth = 0;
+    for (; i < length; ++i)
+    {
+        const auto c = text[i];
+        if (c == 0 || c >= 0x80)
+            return false;
+        if (c == '/' && i + 1 < length && text[i + 1] == '>')
+            --depth;
+        if (c != '<')
+            continue;
+        const auto next = i + 1 < length ? text[i + 1] : 0;
+        if (next == '!' || next == '?')
+            return false;
+        if (++tags > kMaxXmlTags)
+            return false;
+        if (next == '/')
+            --depth;
+        else if (++depth > kMaxXmlDepth)
+            return false;
+    }
+    return true;
 }
 
 // A finite number, or `fallback` for NaN, Inf and anything a float can't hold.
