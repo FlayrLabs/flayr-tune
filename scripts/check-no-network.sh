@@ -163,7 +163,18 @@ for f in "${binaries[@]}"; do
             ;;
         *) report "unexpected file type ($kind) for this platform: $f" ;;
     esac
-    check_names "$f"
+    scan="$f"
+    if [[ "$(uname -s):$kind" == Darwin:macho ]] && codesign -d "$f" >/dev/null 2>&1; then
+        # A code signature embeds Apple's certificate and revocation URLs (crl.apple.com,
+        # ocsp.apple.com) in its CMS blob. They belong to the signature, not the plug-in's
+        # code, so scan a copy with the signature removed: a signed release and the
+        # unsigned build it came from must give the same result.
+        scan="$(mktemp)"
+        cp "$f" "$scan"
+        run codesign --remove-signature "$scan" >/dev/null
+    fi
+    check_names "$scan"
+    [[ "$scan" == "$f" ]] || rm -f "$scan"
 done
 
 if [[ $failed -ne 0 ]]; then
