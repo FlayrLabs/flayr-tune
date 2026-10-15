@@ -1,6 +1,9 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <cctype>
+#include <cstring>
+
 namespace
 {
 struct Preset
@@ -36,6 +39,11 @@ FlayrTuneProcessor::FlayrTuneProcessor()
     engine.setTrack (&track);
     for (int pc = 0; pc < 12; ++pc)
         raw.removed[(size_t) pc] = get (removeId (pc));
+
+    // Same order as the values setCurrentProgram() applies.
+    size_t i = 0;
+    for (auto* id : { "retune", "humanize", "flex", "natvib", "formantShift", "transpose", "vibDepth", "formant" })
+        presetTargets[i++] = dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (id));
 
     startTimerHz (10);
 }
@@ -111,29 +119,73 @@ void FlayrTuneProcessor::prepareToPlay (double sampleRate, int)
     engine.prepare (sampleRate, juce::jmax (1, getTotalNumInputChannels()));
     setLatencySamples (engine.getLatencySamples (raw.live->load() > 0.5f));
     heldNotes.fill (false);
+
+    // Studio latency is the larger of the two modes; 0 if the rate is unsupported.
+    const int maxLatency = engine.getLatencySamples (false);
+    bypassDelay.setSize (juce::jmax (1, getTotalNumInputChannels()), maxLatency > 0 ? tune::nextPow2 (maxLatency + 1) : 0);
+    bypassDelay.clear();
+    bypassPos = 0;
+}
+
+void FlayrTuneProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    // The plug-in still reports its latency while bypassed, so delay the dry signal by the
+    // same amount instead of passing it through early.
+    const int latency = getLatencySamples();
+    const int length = bypassDelay.getNumSamples();
+    const int numCh = juce::jmin (buffer.getNumChannels(), bypassDelay.getNumChannels());
+    for (int c = getTotalNumInputChannels(); c < juce::jmin (getTotalNumOutputChannels(), buffer.getNumChannels()); ++c)
+        buffer.clear (c, 0, buffer.getNumSamples());
+    if (latency <= 0 || latency >= length || numCh <= 0)
+        return;
+    const int mask = length - 1;
+    for (int c = 0; c < numCh; ++c)
+    {
+        auto* io = buffer.getWritePointer (c);
+        auto* ring = bypassDelay.getWritePointer (c);
+        for (int i = 0, pos = bypassPos; i < buffer.getNumSamples(); ++i, pos = (pos + 1) & mask)
+        {
+            ring[pos] = io[i];
+            io[i] = ring[(pos - latency) & mask];
+        }
+    }
+    bypassPos = (bypassPos + buffer.getNumSamples()) & mask;
 }
 
 tune::Params FlayrTuneProcessor::readParams() const
 {
+    // A non-finite value (setStateInformation filters them, but a host could still
+    // inject one) falls back to the parameter's default from createLayout().
+    auto get = [] (const std::atomic<float>* v, float fallback)
+    {
+        const float x = v->load();
+        return std::isfinite (x) ? x : fallback;
+    };
+    auto choice = [&get] (const std::atomic<float>* v, int fallback, int count)
+    {
+        // Clamp before the cast: converting a float beyond int's range (1e30) is undefined.
+        return (int) juce::jlimit (0.0f, (float) (count - 1), get (v, (float) fallback));
+    };
+
     tune::Params p;
-    p.retuneMs = raw.retune->load();
-    p.humanize = raw.humanize->load() / 100.0f;
-    p.expression = raw.flex->load() / 100.0f;
-    p.naturalVibratoDb = raw.natvib->load();
-    p.key = (int) raw.key->load();
-    p.scale = (int) raw.scale->load();
-    p.inputType = (int) raw.inputType->load();
-    p.formantPreserve = raw.formant->load() > 0.5f;
+    p.retuneMs = get (raw.retune, 20.0f);
+    p.humanize = get (raw.humanize, 0.0f) / 100.0f;
+    p.expression = get (raw.flex, 0.0f) / 100.0f;
+    p.naturalVibratoDb = get (raw.natvib, 0.0f);
+    p.key = choice (raw.key, 0, (int) tune::kNoteNames.size());
+    p.scale = choice (raw.scale, 0, (int) tune::kScaleNames.size());
+    p.inputType = choice (raw.inputType, 1, 4);
+    p.formantPreserve = get (raw.formant, 1.0f) > 0.5f;
     // The engine models a vocal-tract length: +12 st of formant shift = half the length.
-    p.throat = std::pow (2.0f, -raw.formantShift->load() / 12.0f);
-    p.transpose = raw.transpose->load();
-    p.concertA = raw.concertA->load();
-    p.tracking = raw.tracking->load() / 100.0f;
-    p.vibRateHz = raw.vibRate->load();
-    p.vibDepthCents = raw.vibDepth->load();
-    p.vibDelayMs = raw.vibDelay->load();
-    p.mix = raw.mix->load() / 100.0f;
-    p.outputGain = juce::Decibels::decibelsToGain (raw.output->load());
+    p.throat = std::pow (2.0f, -get (raw.formantShift, 0.0f) / 12.0f);
+    p.transpose = get (raw.transpose, 0.0f);
+    p.concertA = get (raw.concertA, 440.0f);
+    p.tracking = get (raw.tracking, 50.0f) / 100.0f;
+    p.vibRateHz = get (raw.vibRate, 5.5f);
+    p.vibDepthCents = get (raw.vibDepth, 0.0f);
+    p.vibDelayMs = get (raw.vibDelay, 400.0f);
+    p.mix = get (raw.mix, 100.0f) / 100.0f;
+    p.outputGain = juce::Decibels::decibelsToGain (get (raw.output, 0.0f));
     p.midiTarget = raw.midiTarget->load() > 0.5f;
     p.liveMode = raw.live->load() > 0.5f;
     for (int pc = 0; pc < 12; ++pc)
@@ -149,10 +201,13 @@ void FlayrTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     for (const auto meta : midi)
     {
         const auto msg = meta.getMessage();
-        if (msg.isNoteOn())
-            heldNotes[(size_t) msg.getNoteNumber()] = true;
-        else if (msg.isNoteOff())
-            heldNotes[(size_t) msg.getNoteNumber()] = false;
+        if (msg.isNoteOn() || msg.isNoteOff())
+        {
+            // AU and LV2 hand over raw bytes, so the note number can be anything up to 255.
+            const int note = msg.getNoteNumber();
+            if (juce::isPositiveAndBelow (note, (int) heldNotes.size()))
+                heldNotes[(size_t) note] = msg.isNoteOn();
+        }
         else if (msg.isAllNotesOff() || msg.isAllSoundOff())
             heldNotes.fill (false);
     }
@@ -176,16 +231,23 @@ void FlayrTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
             else if (const auto secs = pos->getTimeInSeconds())
                 hostSample = *secs * getSampleRate();
         }
+    // The GUI walks the timeline from the playhead, so keep it finite and in a sane range.
+    const double maxSamples = kMaxPlayheadSeconds * engine.getSampleRate();
+    hostSample = std::isfinite (hostSample) ? juce::jlimit (-maxSamples, maxSamples, hostSample) : 0.0;
     hostPlaying.store (playing, std::memory_order_relaxed);
-    playheadSeconds.store (hostSample / engine.getSampleRate(), std::memory_order_relaxed);
+    playheadSeconds.store (juce::jlimit (0.0, kMaxPlayheadSeconds, hostSample / engine.getSampleRate()),
+                           std::memory_order_relaxed);
     engine.setTransport (playing, hostSample, trackArmed.load (std::memory_order_relaxed),
                          raw.graph->load() > 0.5f);
 
+    // Never trust the buffer to have as many channels as the buses (a host can pass 0).
     const int numIn = getTotalNumInputChannels();
-    for (int c = numIn; c < getTotalNumOutputChannels(); ++c)
+    for (int c = numIn; c < juce::jmin (getTotalNumOutputChannels(), buffer.getNumChannels()); ++c)
         buffer.clear (c, 0, buffer.getNumSamples());
 
-    engine.process (buffer.getArrayOfWritePointers(), juce::jmin (numIn, buffer.getNumChannels()), buffer.getNumSamples());
+    const int numCh = juce::jmin (numIn, buffer.getNumChannels());
+    if (numCh > 0)
+        engine.process (buffer.getArrayOfWritePointers(), numCh, buffer.getNumSamples());
 }
 
 //==============================================================================
@@ -203,24 +265,127 @@ void FlayrTuneProcessor::setCurrentProgram (int index)
     currentProgram = index;
     const auto& pr = kPresets[(size_t) index];
 
-    auto set = [this] (const char* id, float value)
-    {
-        if (auto* param = apvts.getParameter (id))
-            param->setValueNotifyingHost (param->convertTo0to1 (value));
-    };
-    set ("retune", pr.retune);
-    set ("humanize", pr.humanize);
-    set ("flex", pr.flex);
-    set ("natvib", pr.natVib);
-    set ("formantShift", pr.formantShift);
-    set ("transpose", pr.transpose);
-    set ("vibDepth", pr.vibDepth);
-    set ("formant", pr.formant ? 1.0f : 0.0f);
+    // Hosts may call this from the audio thread, so no lookups by name (they allocate).
+    const std::array<float, 8> values { pr.retune, pr.humanize, pr.flex, pr.natVib, pr.formantShift,
+                                        pr.transpose, pr.vibDepth, pr.formant ? 1.0f : 0.0f };
+    for (size_t i = 0; i < values.size(); ++i)
+        if (auto* param = presetTargets[i])
+            param->setValueNotifyingHost (param->convertTo0to1 (values[i]));
 }
 
 namespace
 {
 const juce::Identifier kTrackTag ("PitchTrack");
+
+// Project files can come from anyone. JUCE's XML parser expands <!DOCTYPE>/<!ENTITY>
+// definitions and recurses once per nesting level, so a crafted blob can overflow the
+// stack (crashing the host) before we ever see the tree, and several of its paths take
+// quadratic time or allocate what the text asks for. This check runs first, over exactly
+// the bytes getXmlFromBinary() would parse, and never tries to understand quotes or
+// attributes, so it can't disagree with the parser in the unsafe direction:
+//  - at most kMaxStateBytes (5 MB; a full 30-minute PitchTrack saves to at most ~4.3 MB);
+//  - only plain ASCII (no NUL, no UTF-8 sequences that could decode to '<');
+//  - no "<!" at all, and "<?" only for the leading <?xml ...?> declaration;
+//  - at most kMaxXmlTags '<' (even inside an attribute). This is the real bound on
+//    nesting: JUCE and ValueTree::fromXml can never recurse deeper than that. (The
+//    nesting estimate below, +1 per '<' and -1 per "</" or "/>", is only a cheap early
+//    refusal: a "/>" in text lowers it without closing anything.)
+//  - no ':' anywhere: an attribute named "base64:<x>" makes ValueTree::fromXml decode
+//    and allocate whatever size the attribute claims;
+//  - at most kMaxXmlAttributes '=' and kMaxXmlEntities '&': JUCE appends to a String per
+//    entity and interns every attribute name in a global pool, both quadratic in count;
+//  - every '&' starts a complete reference: "&amp;", "&lt;", "&gt;", "&quot;", "&apos;"
+//    or "&#" + an optional x + 1-10 hex digits + ';'. JUCE 8.0.16 reads past the end of
+//    the buffer on a trailing "&#x" (patches/juce-xml-entity-overread.patch), and looks
+//    for the ';' of any other name by scanning the rest of the text, so a few MB of '&'
+//    took quadratic time and hung the host.
+// Our own state is ASCII, two levels deep, about 40 tags and 70 attributes, no '&' and
+// no ':', so it always passes.
+constexpr uint32_t kXmlMagic = 0x21324356; // AudioProcessor::copyXmlToBinary header
+constexpr int kMaxStateBytes = FlayrTuneProcessor::kMaxStateBytes;
+constexpr int kMaxXmlTags = FlayrTuneProcessor::kMaxXmlTags;
+constexpr int kMaxXmlDepth = 8;
+constexpr int kMaxXmlAttributes = FlayrTuneProcessor::kMaxXmlAttributes;
+constexpr int kMaxXmlEntities = FlayrTuneProcessor::kMaxXmlEntities;
+
+bool isSafeStateBlob (const void* data, int sizeInBytes)
+{
+    if (data == nullptr || sizeInBytes <= 9 || sizeInBytes > kMaxStateBytes)
+        return false;
+    const auto* bytes = static_cast<const uint8_t*> (data);
+    if (juce::ByteOrder::littleEndianInt (bytes) != kXmlMagic)
+        return false;
+    // getXmlFromBinary parses min (size - 8, length) bytes, stopping early at a NUL.
+    const auto length = (size_t) juce::ByteOrder::littleEndianInt (bytes + 4);
+    if (length == 0 || length > (size_t) sizeInBytes - 8)
+        return false;
+    const auto* text = bytes + 8;
+
+    size_t i = 0;
+    if (length >= 5 && std::memcmp (text, "<?xml", 5) == 0)
+    {
+        for (;; ++i)
+        {
+            if (i + 1 >= length || text[i] == 0 || text[i] >= 0x80)
+                return false;
+            if (text[i] == '?' && text[i + 1] == '>')
+                break;
+        }
+        i += 2;
+    }
+
+    int tags = 0, depth = 0, attributes = 0, entities = 0;
+    for (; i < length; ++i)
+    {
+        const auto c = text[i];
+        if (c == 0 || c >= 0x80)
+            return false;
+        if (c == '/' && i + 1 < length && text[i + 1] == '>')
+            --depth;
+        if (c == ':' || (c == '=' && ++attributes > kMaxXmlAttributes) || (c == '&' && ++entities > kMaxXmlEntities))
+            return false;
+        if (c == '&' && i + 1 < length && text[i + 1] == '#')
+        {
+            size_t j = i + 2;
+            if (j < length && (text[j] == 'x' || text[j] == 'X'))
+                ++j;
+            const size_t digits = j;
+            while (j < length && j < digits + 10 && std::isxdigit (text[j]) != 0)
+                ++j;
+            if (j == digits || j >= length || text[j] != ';')
+                return false;
+        }
+        else if (c == '&')
+        {
+            auto is = [&] (const char* name)
+            {
+                const auto n = std::strlen (name);
+                return i + 1 + n <= length && std::memcmp (text + i + 1, name, n) == 0;
+            };
+            if (! (is ("amp;") || is ("lt;") || is ("gt;") || is ("quot;") || is ("apos;")))
+                return false;
+        }
+        if (c != '<')
+            continue;
+        const auto next = i + 1 < length ? text[i + 1] : 0;
+        if (next == '!' || next == '?')
+            return false;
+        if (++tags > kMaxXmlTags)
+            return false;
+        if (next == '/')
+            --depth;
+        else if (++depth > kMaxXmlDepth)
+            return false;
+    }
+    return true;
+}
+
+// A finite number, or `fallback` for NaN, Inf and anything a float can't hold.
+double finiteOr (const juce::var& v, double fallback)
+{
+    const double d = (double) v;
+    return std::isfinite (d) && std::isfinite ((float) d) ? d : fallback;
+}
 
 // Captured pitch + edits up to the track's extent, gzipped, so they save with the project.
 juce::String encodeTrack (const tune::PitchTrack& t)
@@ -243,6 +408,17 @@ juce::String encodeTrack (const tune::PitchTrack& t)
 void decodeTrack (tune::PitchTrack& t, const juce::String& data)
 {
     t.clearAll();
+    // JUCE's base64 format is "<byte count>.<chars>", and fromBase64Encoding allocates
+    // whatever the count says before reading a character: "2000000000." asked for 2 GB,
+    // "-1." for SIZE_MAX (std::bad_alloc thrown into the host). Only a count the
+    // characters can actually fill gets through.
+    const int dot = data.indexOfChar ('.');
+    if (dot <= 0 || dot > 9 || ! data.substring (0, dot).containsOnly ("0123456789"))
+        return;
+    const auto declared = data.substring (0, dot).getLargeIntValue();
+    const auto encoded = (juce::int64) data.length() - dot - 1;
+    if (declared <= 0 || declared > encoded * 3 / 4 + 3)
+        return;
     juce::MemoryBlock packed;
     if (! packed.fromBase64Encoding (data))
         return;
@@ -273,9 +449,29 @@ void decodeTrack (tune::PitchTrack& t, const juce::String& data)
 }
 } // namespace
 
+bool FlayrTuneProcessor::isAcceptableState (const void* data, int sizeInBytes)
+{
+    return isSafeStateBlob (data, sizeInBytes);
+}
+
 void FlayrTuneProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
+    // A host can push NaN into a parameter. JUCE can't write NaN to XML (it converts it to
+    // int, which is undefined) and loading would only turn it into the default, so save that.
+    for (auto child : state)
+        for (int i = child.getNumProperties(); --i >= 0;)
+        {
+            const auto name = child.getPropertyName (i);
+            if (const auto& v = child.getProperty (name); v.isDouble() && ! std::isfinite ((double) v))
+            {
+                auto* param = dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (child.getProperty ("id").toString()));
+                if (param != nullptr && name == juce::Identifier ("value"))
+                    child.setProperty (name, param->convertFrom0to1 (param->getDefaultValue()), nullptr);
+                else
+                    child.removeProperty (name, nullptr);
+            }
+        }
     state.removeChild (state.getChildWithName (kTrackTag), nullptr);
     if (track.getExtent() > 0)
     {
@@ -289,6 +485,21 @@ void FlayrTuneProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void FlayrTuneProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
+    // Nothing may escape into the host: an allocation failure (or any other exception from
+    // JUCE) while loading a project leaves the current state as it is instead.
+    try
+    {
+        loadState (data, sizeInBytes);
+    }
+    catch (...)
+    {
+    }
+}
+
+void FlayrTuneProcessor::loadState (const void* data, int sizeInBytes)
+{
+    if (! isSafeStateBlob (data, sizeInBytes))
+        return;
     auto xml = getXmlFromBinary (data, sizeInBytes);
     if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
         return;
@@ -299,19 +510,38 @@ void FlayrTuneProcessor::setStateInformation (const void* data, int sizeInBytes)
     const auto oldThroat = tree.getChildWithProperty ("id", "throat");
     if (oldThroat.isValid() && ! tree.getChildWithProperty ("id", "formantShift").isValid())
     {
-        const double length = juce::jlimit (0.5, 2.0, (double) oldThroat.getProperty ("value", 100.0) / 100.0);
+        const double length = juce::jlimit (0.5, 2.0, finiteOr (oldThroat.getProperty ("value", 100.0), 100.0) / 100.0);
         juce::ValueTree shift ("PARAM");
         shift.setProperty ("id", "formantShift", nullptr);
         shift.setProperty ("value", juce::jlimit (-6.0, 6.0, -12.0 * std::log2 (length)), nullptr);
         tree.appendChild (shift, nullptr);
     }
-    tree.removeChild (oldThroat, nullptr);
     const auto trackTree = tree.getChildWithName (kTrackTag);
     if (trackTree.isValid())
         decodeTrack (track, trackTree.getProperty ("data").toString());
     else
         track.clearAll();
-    tree.removeChild (trackTree, nullptr);
+
+    // Only our own parameters are kept, rebuilt as a flat list: anything else in the file
+    // (unknown elements, nesting, stray attributes) would be saved back with the project,
+    // possibly deeper or larger than the pre-scan allows, and the project would then
+    // refuse to load after its first save. Loading replaces the whole state, so a
+    // parameter the file doesn't mention goes to its default rather than keeping this
+    // instance's value. "nan" or "inf" survive jlimit and would stick in the engine, so
+    // they become defaults too.
+    juce::ValueTree clean (apvts.state.getType());
+    for (auto* param : getParameters())
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
+        {
+            const auto child = tree.getChildWithProperty ("id", ranged->paramID);
+            const double fallback = ranged->convertFrom0to1 (ranged->getDefaultValue());
+            juce::ValueTree entry ("PARAM");
+            entry.setProperty ("id", ranged->paramID, nullptr);
+            entry.setProperty ("value", child.hasProperty ("value") ? finiteOr (child.getProperty ("value"), fallback) : fallback,
+                               nullptr);
+            clean.appendChild (entry, nullptr);
+        }
+    tree = clean;
     apvts.replaceState (tree);
 
     // replaceState skips parameters whose stored value didn't change, which can leave
@@ -319,9 +549,8 @@ void FlayrTuneProcessor::setStateInformation (const void* data, int sizeInBytes)
     for (auto* param : getParameters())
         if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
         {
-            const auto child = tree.getChildWithProperty ("id", ranged->paramID);
-            if (child.isValid() && child.hasProperty ("value"))
-                ranged->setValueNotifyingHost (ranged->convertTo0to1 ((float) child.getProperty ("value")));
+            const auto saved = tree.getChildWithProperty ("id", ranged->paramID).getProperty ("value");
+            ranged->setValueNotifyingHost (ranged->convertTo0to1 ((float) saved));
         }
 }
 

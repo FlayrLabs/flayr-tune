@@ -35,7 +35,7 @@ Audio quality bugs and crashes that need no untrusted input are regular bugs: pl
 
 ## What Flayr Tune does and doesn't do
 
-- **No network access.** The plug-in never connects to the internet. There is no telemetry, no analytics, no licence check and no auto-update.
+- **No network access, and no networking code.** The plug-in never connects to the internet. There is no telemetry, no analytics, no licence check and no auto-update. Releases after 1.3.0 go further: the HTTP, socket and network-interface code that JUCE normally compiles in is replaced by stubs that always fail ([`patches/juce-no-network.patch`](patches/juce-no-network.patch)), so the plug-in binary imports no networking functions at all. See [Checking for networking code](#checking-for-networking-code).
 - **No files written** outside your DAW project. Settings and Graph edits are saved inside the project by your DAW.
 - **No elevated privileges.** The plug-in runs with your DAW's permissions. The installers only copy the plug-in into the standard plug-in folders.
 - Untrusted data the plug-in reads (saved state from a project) is size-limited and validated before use.
@@ -59,12 +59,50 @@ codesign -dv --verbose=2 "/Library/Audio/Plug-Ins/Components/Flayr Tune.componen
 
 You should see `Notarized Developer ID` and `Developer ID Application: Flayr Labs LLC (NRNU83UJ68)`.
 
-**Windows and Linux:** these files are built from the tagged source by GitHub Actions, in public. Releases after 1.3.0 also carry a signed build provenance attestation. With the [GitHub CLI](https://cli.github.com):
+**Windows and Linux:** these files are built from the tagged source by GitHub Actions, in public, on GitHub-hosted runners. Releases after 1.3.0 also carry a signed build provenance attestation. With the [GitHub CLI](https://cli.github.com), check that a file was built by this repository's release workflow from the release tag (replace `v1.4.0` with the version you downloaded):
 
 ```sh
-gh attestation verify FlayrTune-*-Windows-Setup.exe --repo FlayrLabs/flayr-tune
+gh attestation verify FlayrTune-1.4.0-Windows-Setup.exe --repo FlayrLabs/flayr-tune \
+  --signer-workflow FlayrLabs/flayr-tune/.github/workflows/release.yml \
+  --source-ref refs/tags/v1.4.0 --deny-self-hosted-runners
 ```
 
-The Windows installer isn't Authenticode-signed yet, so Windows SmartScreen may warn about it.
+**The Windows installer and plug-in are not Authenticode-signed**, so Windows SmartScreen may warn about them and Windows itself can't tell you who made them. Check them before installing: the file's SHA-256 must appear in the release's `SHA256SUMS.txt` (the `certutil` command above), and the attestation command above must pass. The installer is built with a pinned Inno Setup 6.7.1, verified by its SHA-256 (`packaging/windows/build-installer.ps1`).
+
+**Releases are immutable.** The repository has GitHub's immutable releases turned on: once a release is published, its files and tag can't be changed or replaced, by anyone. Our release workflow and scripts also refuse to touch a release that isn't a draft, and `SHA256SUMS.txt` only lists files whose provenance was verified (`scripts/verify-release-assets.sh`).
+
+## Checking for networking code
+
+Releases after 1.3.0 contain no networking code, and CI and both release builds fail if the
+plug-in imports a networking API or contains the name of one
+([`scripts/check-no-network.sh`](scripts/check-no-network.sh)). That check is a tripwire, not a
+proof: it looks at imports and at the names a run-time lookup would need, so code that assembled
+those names at run time or made system calls directly would get past it. The real guarantee is
+the source: the networking code is compiled out (see the patch above), which you can read and
+build yourself.
+
+You can check an installed plug-in with your platform's own tools; each command should print
+nothing:
+
+```sh
+# macOS (repeat with -arch x86_64 on Intel)
+nm -u -arch arm64 "/Library/Audio/Plug-Ins/VST3/Flayr Tune.vst3/Contents/MacOS/Flayr Tune" \
+  | grep -E '^_(socket|connect|bind|listen|accept|getaddrinfo|send|sendto|recv|recvfrom)(\$|$)|NSURLSession|CFNetwork'
+grep -aoE 'NSURLSession|NSURLConnection|CFNetwork|getaddrinfo|dataWithContentsOfURL' \
+  "/Library/Audio/Plug-Ins/VST3/Flayr Tune.vst3/Contents/MacOS/Flayr Tune"
+
+# Linux
+nm -D --undefined-only ~/.vst3/"Flayr Tune.vst3"/Contents/x86_64-linux/"Flayr Tune.so" \
+  | grep -wE 'socket|connect|bind|listen|accept|getaddrinfo|send|sendto|recv|recvfrom'
+```
+
+```bat
+:: Windows, from a "Developer Command Prompt for VS" (dumpbin ships with Visual Studio)
+dumpbin /imports "C:\Program Files\Common Files\VST3\Flayr Tune.vst3\Contents\x86_64-win\Flayr Tune.vst3" | findstr /i "wininet winhttp ws2_32 wsock32"
+```
+
+Two things you may still see, neither of which is networking: on Linux, `socketpair`, which
+JUCE's message loop uses to wake itself inside the process (`AF_LOCAL`, never a network
+socket); and `gethostname`, which reads the computer's name.
 
 You can also build Flayr Tune yourself from source; see the [README](README.md#build-from-source).

@@ -27,7 +27,9 @@ The Mac build is signed and notarized, so it opens without security warnings.
 
 ### Windows
 Run the installer. It puts the plug-in in `C:\Program Files\Common Files\VST3`, where every VST3 host looks.
-The installer isn't code-signed yet, so Windows may say "Windows protected your PC": click **More info**, then **Run anyway**.
+The installer isn't code-signed (no Authenticode signature) yet, so Windows may say "Windows protected your PC". Before you
+click **More info**, then **Run anyway**, check the download against `SHA256SUMS.txt` and its build provenance as
+described in [Verifying your download](SECURITY.md#verifying-your-download).
 
 ### Linux
 ```sh
@@ -142,7 +144,8 @@ Bug reports, DAW compatibility notes and pull requests are welcome. See [CONTRIB
 
 ## Security
 
-Flayr Tune makes no network connections and collects no data. Every release includes
+Flayr Tune makes no network connections and collects no data; the plug-in contains no networking
+code at all, and [you can check that yourself](SECURITY.md#checking-for-networking-code). Every release includes
 `SHA256SUMS.txt`, the Mac build is signed and notarized, and the Windows and Linux builds carry
 GitHub build provenance. See [SECURITY.md](SECURITY.md) to verify a download or report a
 vulnerability privately.

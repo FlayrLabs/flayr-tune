@@ -105,7 +105,8 @@ double GraphEditor::secondsAt (float x) const
 float GraphEditor::noteAt (float y) const
 {
     const auto c = canvas();
-    return viewLow + (c.getBottom() - y) / c.getHeight() * (viewHigh - viewLow);
+    // Saved targets outside the MIDI range are dropped on reload, so never draw one.
+    return juce::jlimit (0.0f, 127.0f, viewLow + (c.getBottom() - y) / c.getHeight() * (viewHigh - viewLow));
 }
 
 //==============================================================================
@@ -178,8 +179,12 @@ void GraphEditor::paint (juce::Graphics& g)
     // Seconds grid.
     const double step = viewLength > 30 ? 5.0 : viewLength > 12 ? 2.0 : viewLength > 4 ? 1.0 : 0.25;
     g.setFont (font (10.0f));
-    for (double t = std::ceil (viewStart / step) * step; t < viewStart + viewLength; t += step)
+    // Counted, so a far-out position where t + step == t can't hang the message thread.
+    const double firstLine = std::ceil (viewStart / step) * step;
+    const int numLines = std::isfinite (firstLine) ? juce::jlimit (0, 64, (int) std::ceil ((viewStart + viewLength - firstLine) / step)) : 0;
+    for (int line = 0; line < numLines; ++line)
     {
+        const double t = firstLine + line * step;
         const float x = xFor (t);
         g.setColour (ui::line.withAlpha (0.6f));
         g.drawVerticalLine ((int) x, c.getY(), c.getBottom());
@@ -306,7 +311,8 @@ void GraphEditor::writeRange (int a, int b, float noteA, float noteB, uint8_t mo
         std::swap (a, b);
         std::swap (noteA, noteB);
     }
-    for (int i = a; i <= b; ++i)
+    const int first = juce::jmax (a, 0), last = juce::jmin (b, tune::PitchTrack::kCapacity - 1);
+    for (int i = first; i <= last; ++i)
     {
         const float t = b == a ? 0.0f : (float) (i - a) / (float) (b - a);
         track.setTarget (i, mode == tune::PitchTrack::kNone ? NAN : noteA + t * (noteB - noteA), mode);

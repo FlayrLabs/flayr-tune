@@ -15,6 +15,9 @@ public:
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     using AudioProcessor::processBlock;
+    // Bypass keeps the reported latency, so bypassed audio stays in time with the rest of the mix.
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    using AudioProcessor::processBlockBypassed;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -45,9 +48,18 @@ public:
     std::atomic<bool> trackArmed { false };
     std::atomic<double> playheadSeconds { 0.0 };
     std::atomic<bool> hostPlaying { false };
+    static constexpr double kMaxPlayheadSeconds = 1.0e7;
+    // Largest saved state we accept. A full 30-minute PitchTrack of random notes saves to
+    // 3.7 MB (tests/plugin_test.cpp measures it); even incompressible data would be 4.3 MB.
+    static constexpr int kMaxStateBytes = 5 * 1024 * 1024;
+    // Limits of the pre-scan setStateInformation runs before JUCE parses anything (see
+    // isSafeStateBlob in PluginProcessor.cpp), exposed for the differential tests.
+    static constexpr int kMaxXmlTags = 256, kMaxXmlAttributes = 512, kMaxXmlEntities = 256;
+    static bool isAcceptableState (const void* data, int sizeInBytes);
 
 private:
     tune::Params readParams() const;
+    void loadState (const void* data, int sizeInBytes); // setStateInformation without the catch-all
     void timerCallback() override; // keeps the host's latency in step with Live mode
 
     // Cached so the audio thread never looks parameters up by name.
@@ -63,7 +75,12 @@ private:
         std::array<std::atomic<float>*, 12> removed;
     } raw;
 
+    // Parameters a preset sets, looked up once so setCurrentProgram() doesn't allocate.
+    std::array<juce::RangedAudioParameter*, 8> presetTargets {};
+
     std::array<bool, 128> heldNotes {};
+    juce::AudioBuffer<float> bypassDelay; // ring buffer, power-of-two length
+    int bypassPos = 0;
     int currentProgram = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FlayrTuneProcessor)

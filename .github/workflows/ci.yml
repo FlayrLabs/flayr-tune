@@ -24,7 +24,9 @@ jobs:
           - { name: Windows (VST3), os: windows-2022 }
           - { name: Linux (VST3 + LV2), os: ubuntu-22.04 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Linux dependencies
         if: runner.os == 'Linux'
@@ -43,8 +45,17 @@ jobs:
       - name: DSP tests
         run: ctest --test-dir build -C Release --output-on-failure
 
+      - name: No networking in the plug-in
+        shell: bash
+        run: scripts/check-no-network.sh build/FlayrTune_artefacts/Release
+
+      - name: Windows installer (pinned Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: packaging/windows/build-installer.ps1 -Version 0.0.0
+
       - name: Upload plug-ins
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: FlayrTune-${{ runner.os }}
           path: |
@@ -53,3 +64,62 @@ jobs:
             build/FlayrTune_artefacts/Release/LV2
           if-no-files-found: error
           retention-days: 14
+
+  fuzz:
+    name: Fuzz smoke (Linux, libFuzzer)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libfreetype6-dev libfontconfig1-dev libx11-dev libxcomposite-dev \
+            libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev libgl1-mesa-dev
+
+      - name: Build fuzzers (ASan + UBSan)
+        run: |
+          cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DFLAYR_TUNE_BUILD_FUZZERS=ON -DFLAYR_TUNE_BUILD_TESTS=OFF -DFLAYR_TUNE_COPY_AFTER_BUILD=OFF
+          grep -q 'FLAYR_HAVE_LIBFUZZER:INTERNAL=1' build-fuzz/CMakeCache.txt
+          cmake --build build-fuzz --target fuzz_state fuzz_host fuzz_vst3 fuzz_make_corpus --parallel 4
+
+      - name: Fuzz each target for 60 s
+        working-directory: build-fuzz
+        run: |
+          A=RelWithDebInfo
+          ./fuzz_make_corpus_artefacts/$A/fuzz_make_corpus seeds/state seeds/host seeds/vst3
+          mkdir -p corpus/state corpus/host corpus/vst3 artifacts
+          ./fuzz_state_artefacts/$A/fuzz_state -max_total_time=60 -timeout=20 -max_len=65536 \
+            -dict=../tests/fuzz/fuzz.dict -artifact_prefix=artifacts/ corpus/state seeds/state
+          ./fuzz_host_artefacts/$A/fuzz_host -max_total_time=60 -timeout=20 \
+            -artifact_prefix=artifacts/ corpus/host seeds/host
+          ./fuzz_vst3_artefacts/$A/fuzz_vst3 -max_total_time=60 -timeout=20 -max_len=1048576 \
+            -dict=../tests/fuzz/fuzz.dict -artifact_prefix=artifacts/ corpus/vst3 seeds/vst3
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: build-fuzz/artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+
+  release-script:
+    name: Release script (macOS, stubs only)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the test pushes to a stand-in remote, which a shallow clone can't
+
+      # scripts/release-macos.sh --upload end to end against a local stand-in remote, with
+      # stub codesign / notarytool / hdiutil / spctl / gh. Nothing is signed or uploaded.
+      - name: End-to-end release run in a sandbox
+        run: tests/release_e2e_test.sh

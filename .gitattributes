@@ -1,0 +1,2 @@
+# Patches carry upstream CRLF lines; never let git rewrite them.
+*.patch -text

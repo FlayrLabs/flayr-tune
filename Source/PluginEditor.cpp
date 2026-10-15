@@ -83,7 +83,7 @@ void PitchGraph::push (const tune::DisplayPoint& p)
 {
     hist[(size_t) head] = p;
     head = (head + 1) % (int) hist.size();
-    if (! p.voiced)
+    if (! p.voiced || ! std::isfinite (p.outNote)) // a NaN centre would stick forever
         return;
     // Jump straight to the singer's range on the first note, then only move the view
     // when the voice leaves its middle, so the grid stays still while someone sings.
@@ -101,7 +101,7 @@ void PitchGraph::push (const tune::DisplayPoint& p)
 void PitchGraph::tick()
 {
     centre += 0.2f * (targetCentre - centre);
-    if (std::abs (targetCentre - centre) < 0.01f)
+    if (std::abs (targetCentre - centre) < 0.01f || ! std::isfinite (centre))
         centre = targetCentre;
 }
 
@@ -137,7 +137,7 @@ void PitchGraph::paint (juce::Graphics& g)
         {
             const auto& p = hist[(size_t) ((head + i) % n)];
             const float v = output ? p.outNote : p.inNote;
-            if (! p.voiced || v < lo - 2 || v > hi + 2)
+            if (! p.voiced || ! std::isfinite (v) || v < lo - 2 || v > hi + 2)
             {
                 drawing = false;
                 continue;
@@ -370,7 +370,7 @@ void FlayrTuneEditor::timerCallback()
     {
         graph.push (p);
         lastVoiced = p.voiced;
-        if (p.voiced)
+        if (p.voiced && std::isfinite (p.inNote) && std::isfinite (p.targetNote))
         {
             lastIn = p.inNote;
             lastTarget = p.targetNote;
@@ -379,8 +379,13 @@ void FlayrTuneEditor::timerCallback()
     }
 
     const auto mask = proc.engine.getActiveMask();
-    const int key = (int) proc.apvts.getRawParameterValue ("key")->load();
-    const int scale = (int) proc.apvts.getRawParameterValue ("scale")->load();
+    auto choice = [this] (const char* id, int count)
+    {
+        const float v = proc.apvts.getRawParameterValue (id)->load();
+        return std::isfinite (v) ? juce::jlimit (0, count - 1, (int) v) : 0;
+    };
+    const int key = choice ("key", (int) tune::kNoteNames.size());
+    const int scale = choice ("scale", (int) tune::kScaleNames.size());
     const int targetPc = lastVoiced && lastTarget >= 0 ? ((int) lastTarget) % 12 : -1;
     graph.setMask (mask);
     notes.setState (tune::scalePitchClasses (key, scale), mask, targetPc);

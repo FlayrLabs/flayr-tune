@@ -18,6 +18,7 @@
 #include <complex>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -25,10 +26,11 @@ namespace tune
 {
 constexpr double kPi = 3.14159265358979323846;
 
+// Smallest power of two >= v, saturating at the largest int power of two.
 inline int nextPow2 (int v)
 {
     int p = 1;
-    while (p < v)
+    while (p < v && p <= std::numeric_limits<int>::max() / 2)
         p <<= 1;
     return p;
 }
@@ -562,9 +564,24 @@ class Engine
 public:
     static constexpr int kMaxChannels = 2;
     static constexpr double kMinF0 = 60.0;
+    static constexpr double kMinSampleRate = 8000.0, kMaxSampleRate = 768000.0;
+    static constexpr float kOutputLimit = 4.0f; // hard clip (+12 dBFS) so a fault can't blast the monitors
+    static constexpr float kInputLimit = 1000.0f; // +60 dBFS, far above any real signal
 
+    static bool isSupportedRate (double sampleRate)
+    {
+        return std::isfinite (sampleRate) && sampleRate >= kMinSampleRate && sampleRate <= kMaxSampleRate;
+    }
+
+    // An unsupported rate (0, negative, NaN, absurdly high) leaves the engine unprepared:
+    // process() then outputs silence rather than guessing at buffer sizes.
     void prepare (double sampleRate, int numChannels)
     {
+        if (! isSupportedRate (sampleRate))
+        {
+            prepared = false;
+            return;
+        }
         sr = sampleRate;
         chans = std::clamp (numChannels, 1, kMaxChannels);
         pMax = sr / kMinF0;
@@ -589,8 +606,11 @@ public:
         mono.assign ((size_t) ringSize, 0.0f);
         wsum.assign ((size_t) ringSize, 0.0f);
         segment.assign ((size_t) (2 * wi), 0.0f);
+        prepared = true;
         reset();
     }
+
+    bool isPrepared() const { return prepared; }
 
     void reset()
     {
@@ -601,6 +621,7 @@ public:
             std::fill (residual[(size_t) c].begin(), residual[(size_t) c].end(), 0.0f);
         }
         lpc.reset();
+        formantGuard = {};
         liveFormantBlend = params.formantPreserve ? 1.0f : 0.0f;
         std::fill (mono.begin(), mono.end(), 0.0f);
         std::fill (wsum.begin(), wsum.end(), 0.0f);
@@ -624,10 +645,10 @@ public:
         modeBlend = params.liveMode ? 1.0f : 0.0f;
     }
 
-    int getLatencySamples() const { return latency; }
+    int getLatencySamples() const { return prepared ? latency : 0; }
     double getSampleRate() const { return sr; }
     // Live mode reports its floor; the actual delay floats up to one pitch period above it.
-    int getLatencySamples (bool live) const { return live ? liveMinDelay : latency; }
+    int getLatencySamples (bool live) const { return prepared ? (live ? liveMinDelay : latency) : 0; }
 
     // Key learning: the GUI starts/stops, the audio thread accumulates.
     void beginKeyLearn() { keyClearRequested.store (true); keyLearning.store (true); }
@@ -642,7 +663,31 @@ public:
             h[i] = keyHist[i].load (std::memory_order_relaxed);
         return h;
     }
-    void setParams (const Params& p) { params = p; }
+    // Non-finite values (a corrupt preset, a buggy host) fall back to the defaults and
+    // everything is clamped to a generous working range, so nothing absurd (concert A at
+    // 1e30 Hz, a 1e30-semitone transpose) can reach the filters or the integer casts below.
+    void setParams (const Params& p)
+    {
+        const Params d;
+        params = p;
+        auto fix = [] (float& v, float def, float lo, float hi) { v = std::isfinite (v) ? std::clamp (v, lo, hi) : def; };
+        fix (params.retuneMs, d.retuneMs, 0.0f, 1000.0f);
+        fix (params.humanize, d.humanize, 0.0f, 1.0f);
+        fix (params.expression, d.expression, 0.0f, 1.0f);
+        fix (params.naturalVibratoDb, d.naturalVibratoDb, -24.0f, 24.0f);
+        fix (params.transpose, d.transpose, -24.0f, 24.0f);
+        fix (params.concertA, d.concertA, 400.0f, 480.0f);
+        fix (params.throat, d.throat, 0.25f, 4.0f);
+        fix (params.tracking, d.tracking, 0.0f, 1.0f);
+        fix (params.vibRateHz, d.vibRateHz, 0.1f, 20.0f);
+        fix (params.vibDepthCents, d.vibDepthCents, 0.0f, 200.0f);
+        fix (params.vibDelayMs, d.vibDelayMs, 0.0f, 10000.0f);
+        fix (params.mix, d.mix, 0.0f, 1.0f);
+        fix (params.outputGain, d.outputGain, 0.0f, 1000.0f);
+        params.key = std::clamp (params.key, 0, 11);
+        params.scale = std::clamp (params.scale, 0, (int) kScaleNames.size() - 1);
+        params.inputType = std::clamp (params.inputType, 0, 3);
+    }
 
     // Graph mode. Call setTransport once per block, before process().
     void setTrack (PitchTrack* t) { track = t; }
@@ -669,8 +714,17 @@ public:
 
     void process (float* const* io, int numCh, int numSamples)
     {
-        numCh = std::clamp (numCh, 1, chans);
+        if (io == nullptr || numCh <= 0 || numSamples <= 0) // e.g. a host's 0-channel buffer
+            return;
+        numCh = std::min (numCh, chans);
+        if (! prepared) // never prepared, or the host asked for an unsupported rate
+        {
+            for (int c = 0; c < numCh; ++c)
+                std::fill (io[c], io[c] + std::max (0, numSamples), 0.0f);
+            return;
+        }
         writtenAtBlock = written;
+        bool fault = false;
         const float mix = std::clamp (params.mix, 0.0f, 1.0f);
         const float gain = params.outputGain;
         const float blendTarget = params.liveMode ? 1.0f : 0.0f;
@@ -685,9 +739,12 @@ public:
             lpc.tick (written);
             for (int c = 0; c < numCh; ++c)
             {
-                in[(size_t) c][idx] = io[c][s];
-                residual[(size_t) c][idx] = lpc.whiten (c, io[c][s]);
-                m += io[c][s];
+                // NaN/Inf input becomes silence; absurd levels are clipped before they can
+                // overflow the filters (each overflow costs a full reset on the audio thread).
+                const float x = std::isfinite (io[c][s]) ? std::clamp (io[c][s], -kInputLimit, kInputLimit) : 0.0f;
+                in[(size_t) c][idx] = x;
+                residual[(size_t) c][idx] = lpc.whiten (c, x);
+                m += x;
             }
             mono[idx] = m / (float) numCh;
             ++written;
@@ -698,9 +755,17 @@ public:
                 analyse();
             }
 
-            // Studio path: PSOLA grains, read out `latency` samples behind.
-            while (synPos + lookBehind <= (double) (written - 1))
+            // Studio path: PSOLA grains, read out `latency` samples behind. Each grain moves
+            // synPos on by at least a sample; the cap is a backstop against a stuck clock.
+            for (int g = 0; synPos + lookBehind <= (double) (written - 1); ++g)
+            {
+                if (g >= kMaxGrainsPerSample)
+                {
+                    synPos = anaPos = (double) (written - lookBehind);
+                    break;
+                }
                 addGrain (numCh);
+            }
 
             const int64_t r = written - 1 - latency;
             const auto ri = (size_t) (r & ringMask);
@@ -755,7 +820,10 @@ public:
 
                 const float wet = studioWet + modeBlend * (liveWet - studioWet);
                 const float dry = studioDry + modeBlend * (liveDry - studioDry);
-                io[c][s] = gain * (mix * wet + (1.0f - mix) * dry);
+                const float out = gain * (mix * wet + (1.0f - mix) * dry);
+                if (! std::isfinite (out))
+                    fault = true;
+                io[c][s] = std::isfinite (out) ? std::clamp (out, -kOutputLimit, kOutputLimit) : 0.0f;
             }
             if (r >= 0)
                 wsum[ri] = 0.0f;
@@ -771,6 +839,11 @@ public:
                 }
             }
         }
+
+        // A non-finite sample or state means something went wrong upstream; start clean
+        // rather than letting NaN circulate through the filters and delay lines forever.
+        if (fault || ! std::isfinite (liveRead + liveReadB + liveRatioSm + synPos + anaPos + vibPhase + corr))
+            reset();
     }
 
 private:
@@ -803,7 +876,9 @@ private:
         // Studio uses the full window for stability.
         if (params.liveMode && wasVoiced && trackedPeriod > 0.0)
             maxTau = std::clamp ((int) std::ceil (1.5 * trackedPeriod), minTau + 8, maxTau);
-        const int intLen = params.liveMode ? std::max (maxTau, 256) : wi;
+        // The segment holds 2 * wi samples, so keep the window and lag inside it.
+        const int intLen = params.liveMode ? std::min (std::max (maxTau, 256), wi) : wi;
+        maxTau = std::min (maxTau, 2 * wi - intLen - 2);
         const int n = PitchDetector::segmentLength (intLen, maxTau);
         const int64_t start = written - n;
         double energySum = 0.0;
@@ -1141,8 +1216,10 @@ private:
             wsum[ko] += w;
         }
 
-        synPos += pa / ratio;
-        anaPos += pa;
+        // Always move forward, even if a corrupt period or ratio slipped through.
+        const double step = pa / ratio;
+        synPos += std::isfinite (step) && step >= 1.0 ? step : 1.0;
+        anaPos += std::isfinite (pa) && pa >= 1.0 ? pa : 1.0;
     }
 
     // Live mode analyses twice as often so corrections land sooner.
@@ -1197,7 +1274,10 @@ private:
     }
 
     //==========================================================================
+    static constexpr int kMaxGrainsPerSample = 64;
+
     Params params;
+    bool prepared = false;
     PitchDetector detector;
     double sr = 48000.0, pMax = 800.0, unvoicedPeriod = 240.0;
     int chans = 2, wi = 1024, hop = 128, lookBehind = 0, latency = 0;
