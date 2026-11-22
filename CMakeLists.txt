@@ -137,6 +137,15 @@ if(FLAYR_TUNE_BUILD_TESTS)
     target_link_libraries(plugin_test PRIVATE juce::juce_audio_processors juce::juce_recommended_config_flags)
     add_test(NAME plugin_test COMMAND plugin_test)
 
+    # Graph mode under the transports real hosts report, Audacity 4 included (issue #11).
+    juce_add_console_app(graph_host_test PRODUCT_NAME "graph_host_test")
+    target_sources(graph_host_test PRIVATE tests/graph_host_test.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/GraphEditor.cpp)
+    target_include_directories(graph_host_test PRIVATE Source)
+    target_compile_definitions(graph_host_test PRIVATE
+        JucePlugin_Name="Flayr Tune" FLAYR_NO_NETWORK=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
+    target_link_libraries(graph_host_test PRIVATE juce::juce_audio_processors juce::juce_recommended_config_flags)
+    add_test(NAME graph_host_test COMMAND graph_host_test)
+
     # The built VST3, loaded as a host would, against hostile wrapper state.
     juce_add_console_app(vst3_host_test PRODUCT_NAME "vst3_host_test")
     target_sources(vst3_host_test PRIVATE tests/vst3_host_test.cpp)

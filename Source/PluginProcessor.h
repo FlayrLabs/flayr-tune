@@ -43,11 +43,15 @@ public:
     juce::AudioProcessorValueTreeState apvts;
     tune::Engine engine;
 
-    // Graph mode: pitch timeline, the TRACK switch, and the host position for the GUI.
+    // Graph mode: pitch timeline, the TRACK switch, and the timeline position for the GUI.
+    // hostPlaying is whether the Graph timeline is rolling (capturing and applying edits),
+    // which may be inferred when the host doesn't report its transport. timelineEstimated
+    // is set when the position is counted by us because the host doesn't report one.
     tune::PitchTrack track;
     std::atomic<bool> trackArmed { false };
     std::atomic<double> playheadSeconds { 0.0 };
     std::atomic<bool> hostPlaying { false };
+    std::atomic<bool> timelineEstimated { false };
     static constexpr double kMaxPlayheadSeconds = 1.0e7;
     // Largest saved state we accept. A full 30-minute PitchTrack of random notes saves to
     // 3.7 MB (tests/plugin_test.cpp measures it); even incompressible data would be 4.3 MB.
@@ -79,6 +83,7 @@ private:
     std::array<juce::RangedAudioParameter*, 8> presetTargets {};
 
     std::array<bool, 128> heldNotes {};
+    tune::GraphClock graphClock;
     juce::AudioBuffer<float> bypassDelay; // ring buffer, power-of-two length
     int bypassPos = 0;
     int currentProgram = 0;

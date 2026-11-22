@@ -117,7 +117,7 @@ The plug-ins are copied into your user plug-in folders after building
 `libasound2-dev libfreetype6-dev libfontconfig1-dev libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev libgl1-mesa-dev`.
 
 `-DFLAYR_TUNE_BUILD_TOOLS=ON` adds two developer tools:
-- **`FlayrTuneSnapshot out.png [live|graph]`** renders the UI without a DAW.
+- **`FlayrTuneSnapshot out.png [live|graph|graph-nohost]`** renders the UI without a DAW (`graph-nohost`: a host that reports no song position).
 - **`render in.wav prefix`** runs a mono 32-bit float WAV through every mode and reports how in-tune each result is.
 
 ## How it works

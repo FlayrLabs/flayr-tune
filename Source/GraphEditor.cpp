@@ -270,6 +270,20 @@ void GraphEditor::paint (juce::Graphics& g)
         g.setFont (font (14.0f, true));
         g.drawText ("Press TRACK and play the song to capture the vocal's pitch", c, juce::Justification::centred);
     }
+
+    // Some hosts (Audacity) don't tell plug-ins where playback is, so the timeline is
+    // counted from where playback started. Say so, or edits would seem to land at random.
+    if (proc.timelineEstimated.load())
+    {
+        const auto note = c.reduced (8.0f, 6.0f).removeFromTop (18.0f);
+        g.setColour (ui::panel.withAlpha (0.85f));
+        g.fillRect (note);
+        g.setColour (ui::accent2);
+        g.setFont (font (12.0f));
+        g.drawText ("Your DAW doesn't report the song position, so 0:00 here is where playback started. "
+                    "Start playback from the same place each time so edits line up.",
+                    note, juce::Justification::centred);
+    }
 }
 
 //==============================================================================

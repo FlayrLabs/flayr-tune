@@ -510,6 +510,47 @@ int main()
     }
 
     {
+        std::puts ("Graph: timeline when the host's transport can't be trusted (issue #11)");
+        using H = GraphClock::Host;
+        auto runClock = [] (std::function<H (int block, double done)> host, int blocks, int n = 512)
+        {
+            GraphClock c;
+            GraphClock::Position last;
+            double done = 0.0;
+            for (int b = 0; b < blocks; ++b, done += n)
+                last = c.next (host (b, done), n);
+            return last;
+        };
+        // Honest host: playing from 10 s, position moves with the audio.
+        auto honest = runClock ([] (int, double done) { return H { true, true, true, 480000.0 + done }; }, 10);
+        check (honest.rolling && ! honest.estimated && honest.sample == 480000.0 + 9 * 512, "honest host used as reported");
+        // Really stopped: static position, no rolling.
+        auto stopped = runClock ([] (int, double) { return H { true, false, true, 48000.0 }; }, 10);
+        check (! stopped.rolling, "stopped transport doesn't roll");
+        // Audacity VST3: "playing", position never leaves 0.
+        auto frozen = runClock ([] (int, double) { return H { true, true, true, 0.0 }; }, 10);
+        check (frozen.rolling && frozen.estimated && frozen.sample == 9 * 512, "frozen position: counts samples");
+        // Audacity AU: no transport, a sample clock that runs with the audio.
+        auto clockOnly = runClock ([] (int, double done) { return H { true, false, true, done }; }, 10);
+        check (clockOnly.rolling && clockOnly.estimated && clockOnly.sample == 9 * 512, "running clock while 'stopped': rolls");
+        // No playhead at all.
+        auto none = runClock ([] (int, double) { return H {}; }, 10);
+        check (none.rolling && none.estimated && none.sample == 9 * 512, "no playhead: counts samples");
+        // A transport flag but no position: counts from the start of each playback.
+        auto noTime = runClock ([] (int b, double) { return H { true, b >= 5, false, 0.0 }; }, 10);
+        check (noTime.rolling && noTime.sample == 4 * 512, "no position: counts from playback start");
+        // A frozen host stopping and starting again restarts at its position.
+        auto restart = runClock ([] (int b, double) { return H { true, b != 5, true, 0.0 }; }, 10);
+        check (restart.rolling && restart.sample == 3 * 512, "restart after stop goes back to the host's position");
+        // Zero-sample calls (parameter flushes) don't move anything.
+        GraphClock c;
+        c.next ({ true, true, true, 0.0 }, 512);
+        const auto a = c.next ({ true, true, true, 0.0 }, 512);
+        const auto z = c.next ({ true, true, true, 0.0 }, 0);
+        check (z.sample == a.sample && c.next ({ true, true, true, 0.0 }, 512).sample == a.sample + 512, "zero-sample blocks ignored");
+    }
+
+    {
         std::puts ("Graph: capture lines up with the host timeline");
         auto track = std::make_unique<PitchTrack>();
         auto eHeap = std::make_unique<Engine>(); auto& e = *eHeap;
