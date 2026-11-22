@@ -27,12 +27,14 @@ int main (int argc, char** argv)
     if (mode == "live")
         proc.apvts.getParameter ("live")->setValueNotifyingHost (1.0f);
     FakeHead head;
-    const bool graphMode = mode == "graph";
+    // "graph-nohost": Graph mode in a host that reports no playhead (Audacity's case).
+    const bool graphMode = mode == "graph" || mode == "graph-nohost";
     if (graphMode)
     {
         proc.apvts.getParameter ("graph")->setValueNotifyingHost (1.0f);
         proc.trackArmed.store (true);
-        proc.setPlayHead (&head);
+        if (mode == "graph")
+            proc.setPlayHead (&head);
     }
     proc.prepareToPlay (48000.0, 512);
     // "open": a low voice plays for 3 s with the window closed, then the window opens and

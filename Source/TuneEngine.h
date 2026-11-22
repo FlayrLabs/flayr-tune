@@ -559,6 +559,87 @@ private:
 };
 
 //==============================================================================
+// Where Graph mode is on the song timeline, from what the host reports each block.
+// Most hosts report "playing" and a position that moves with the audio. Some don't, and
+// Graph mode would then capture nothing or pile everything onto 0:00. Audacity 4 does
+// both: its VST3 host says "playing" but never sets the position (it stays at 0), and
+// its AU host has no transport at all, only a sample clock that restarts at 0 each time
+// playback starts. When the host can't be trusted we count samples instead, so capture
+// and edits still line up within a playback pass, and `estimated` tells the GUI.
+// Audio thread only; never allocates.
+class GraphClock
+{
+public:
+    struct Host
+    {
+        bool hasPosition = false; // there is a playhead and it answered
+        bool playing = false;
+        bool hasTime = false;     // ... with a finite position
+        double sample = 0.0;      // position at the start of the block
+    };
+
+    struct Position
+    {
+        bool rolling = false;   // capture and apply edits
+        double sample = 0.0;    // where this block starts on the Graph timeline
+        bool estimated = false; // counted by us, not reported by the host
+    };
+
+    // A stopped host whose clock runs on with the audio for this many blocks in a row has
+    // no transport, only a clock (a really stopped transport doesn't move).
+    static constexpr int kAdvancingBlocksToTrust = 2;
+
+    void reset() { *this = GraphClock(); }
+
+    Position next (const Host& h, int numSamples)
+    {
+        if (numSamples <= 0) // a parameter-only call: nothing to place
+            return last;
+
+        Position r;
+        if (! h.hasPosition)
+        {
+            // No playhead at all: audio is flowing, so count it from the last reset.
+            r = { true, counter, true };
+        }
+        else if (! h.hasTime || ! std::isfinite (h.sample))
+        {
+            // A transport flag but no position: count from where this playback started.
+            r = { h.playing, wasPlaying ? counter : 0.0, true };
+        }
+        else if (h.playing)
+        {
+            // Playing, but the position hasn't moved since the last block: count on from there.
+            const bool frozen = hadTime && wasPlaying && std::abs (h.sample - prevSample) < 0.5;
+            r = frozen ? Position { true, counter, true } : Position { true, h.sample, false };
+        }
+        else
+        {
+            const bool advancing = hadTime && std::abs (h.sample - (prevSample + prevBlock)) < 0.5;
+            advancingRuns = advancing ? std::min (advancingRuns + 1, kAdvancingBlocksToTrust) : 0;
+            const bool clockOnly = advancingRuns >= kAdvancingBlocksToTrust;
+            r = { clockOnly, h.sample, clockOnly };
+        }
+        if (! h.hasPosition || ! h.hasTime || h.playing)
+            advancingRuns = 0;
+
+        hadTime = h.hasPosition && h.hasTime && std::isfinite (h.sample);
+        wasPlaying = h.hasPosition && h.playing;
+        prevSample = hadTime ? h.sample : 0.0;
+        prevBlock = numSamples;
+        counter = r.sample + numSamples;
+        last = r;
+        return r;
+    }
+
+private:
+    Position last;
+    double counter = 0.0, prevSample = 0.0;
+    int prevBlock = 0, advancingRuns = 0;
+    bool hadTime = false, wasPlaying = false;
+};
+
+//==============================================================================
 class Engine
 {
 public:

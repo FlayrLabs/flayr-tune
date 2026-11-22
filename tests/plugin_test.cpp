@@ -84,10 +84,11 @@ struct FakeHead : juce::AudioPlayHead
 {
     juce::Optional<juce::int64> samples;
     juce::Optional<double> secs;
+    bool playing = true;
     juce::Optional<PositionInfo> getPosition() const override
     {
         PositionInfo info;
-        info.setIsPlaying (true);
+        info.setIsPlaying (playing);
         info.setTimeInSamples (samples);
         info.setTimeInSeconds (secs);
         return info;
@@ -518,7 +519,8 @@ int main()
         check (std::isfinite (playhead()) && playhead() <= FlayrTuneProcessor::kMaxPlayheadSeconds, "1e300 seconds");
         head.secs = (double) NAN;
         play (p, 0.05, finite);
-        check (playhead() == 0.0 && finite, "NaN seconds");
+        // No usable position: the Graph timeline counts samples instead (see GraphClock).
+        check (std::isfinite (playhead()) && playhead() >= 0.0 && playhead() < 1.0 && finite, "NaN seconds");
         p.setPlayHead (nullptr);
     }
 
@@ -653,6 +655,80 @@ int main()
         std::printf ("  %zu tricky blobs and 40000 mutants: %d accepted, slowest parse %.1f ms\n", blobs.size(), accepted, slowest);
         check (problems == 0, "everything accepted is within the limits as JUCE parses it");
         check (accepted > 100, "and the comparison actually ran on accepted input");
+    }
+
+    {
+        // Hosts that don't report a usable transport (issue #11, Audacity 4): Graph mode must
+        // still capture along a timeline instead of showing nothing. 1 s of A3 (MIDI 57).
+        struct Case
+        {
+            const char* name;
+            bool useHead, playing, advance, offline;
+            juce::int64 start;
+            bool expectCapture, expectEstimated;
+        };
+        const Case cases[] = {
+            { "no playhead", false, false, false, false, 0, true, true },
+            { "playing, position stuck at 0 (Audacity VST3)", true, true, false, false, 0, true, true },
+            { "stuck at 0, offline render", true, true, false, true, 0, true, true },
+            { "not playing, clock runs with the audio (Audacity AU)", true, false, true, false, 0, true, true },
+            { "really stopped at 1 s: no capture", true, false, false, false, 48000, false, false },
+            { "playing from 1 s, honest host", true, true, true, false, 48000, true, false },
+        };
+        for (const auto& k : cases)
+        {
+            std::printf ("Graph capture: %s\n", k.name);
+            FlayrTuneProcessor p;
+            setValue (p, "graph", 1.0f);
+            p.trackArmed.store (true);
+            p.setNonRealtime (k.offline);
+            p.prepareToPlay (48000.0, 512);
+            FakeHead head;
+            head.playing = k.playing;
+            head.samples = k.start;
+            p.setPlayHead (k.useHead ? &head : nullptr);
+
+            juce::AudioBuffer<float> buf (2, 512);
+            juce::MidiBuffer none;
+            double phase = 0.0;
+            bool estimated = true;
+            for (int done = 0, block = 0; done < 48000; ++block)
+            {
+                const int n = juce::jmin (block % 2 == 0 ? 512 : 300, 48000 - done); // uneven blocks
+                buf.setSize (2, n, false, false, true);
+                for (int i = 0; i < n; ++i)
+                {
+                    phase += 2.0 * juce::MathConstants<double>::pi * 220.0 / 48000.0;
+                    buf.setSample (0, i, 0.3f * (float) std::sin (phase));
+                    buf.setSample (1, i, buf.getSample (0, i));
+                }
+                p.processBlock (buf, none);
+                if (block > 4)
+                    estimated &= p.timelineEstimated.load();
+                done += n;
+                if (k.advance)
+                    head.samples = k.start + done;
+            }
+            const double base = (double) k.start / 48000.0;
+            const float mid = p.track.inputAt (tune::PitchTrack::indexFor (base + 0.5));
+            std::printf ("  extent %.2f s, pitch at %.1f s %.2f, playhead %.2f s, estimated %d\n",
+                         tune::PitchTrack::secondsAt (p.track.getExtent()), base + 0.5, mid,
+                         p.playheadSeconds.load(), (int) p.timelineEstimated.load());
+            if (k.expectCapture)
+            {
+                check (std::abs (mid - 57.0f) < 0.1f, "pitch captured at its place on the timeline");
+                check (p.track.getExtent() >= tune::PitchTrack::indexFor (base + 0.9), "capture spans the whole second");
+                check (p.hostPlaying.load() && std::abs (p.playheadSeconds.load() - (base + 1.0)) < 0.05,
+                       "playhead moves with the audio");
+            }
+            else
+            {
+                check (p.track.getExtent() == 0 && ! p.hostPlaying.load(), "nothing captured while stopped");
+            }
+            check (estimated == k.expectEstimated, k.expectEstimated ? "editor is told the position is estimated"
+                                                                     : "host position used as reported");
+            p.setPlayHead (nullptr);
+        }
     }
 
     {

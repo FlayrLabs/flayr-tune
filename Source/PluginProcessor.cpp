@@ -119,6 +119,7 @@ void FlayrTuneProcessor::prepareToPlay (double sampleRate, int)
     engine.prepare (sampleRate, juce::jmax (1, getTotalNumInputChannels()));
     setLatencySamples (engine.getLatencySamples (raw.live->load() > 0.5f));
     heldNotes.fill (false);
+    graphClock.reset(); // VST3 hosts call this on every activation, i.e. each playback start
 
     // Studio latency is the larger of the two modes; 0 if the rate is unsupported.
     const int maxLatency = engine.getLatencySamples (false);
@@ -220,21 +221,28 @@ void FlayrTuneProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     engine.setMidiMask (midiMask);
     engine.setParams (readParams());
 
-    bool playing = false;
-    double hostSample = 0.0;
+    // Where this block sits on the Graph timeline. GraphClock falls back to counting
+    // samples when the host gives no playhead, no position, or one that never moves.
+    tune::GraphClock::Host host;
     if (auto* head = getPlayHead())
         if (const auto pos = head->getPosition())
         {
-            playing = pos->getIsPlaying();
+            host.hasPosition = true;
+            host.playing = pos->getIsPlaying();
             if (const auto t = pos->getTimeInSamples())
-                hostSample = (double) *t;
+                host.sample = (double) *t, host.hasTime = true;
             else if (const auto secs = pos->getTimeInSeconds())
-                hostSample = *secs * getSampleRate();
+                host.sample = *secs * getSampleRate(), host.hasTime = true;
         }
     // The GUI walks the timeline from the playhead, so keep it finite and in a sane range.
     const double maxSamples = kMaxPlayheadSeconds * engine.getSampleRate();
-    hostSample = std::isfinite (hostSample) ? juce::jlimit (-maxSamples, maxSamples, hostSample) : 0.0;
+    host.hasTime = host.hasTime && std::isfinite (host.sample);
+    host.sample = host.hasTime ? juce::jlimit (-maxSamples, maxSamples, host.sample) : 0.0;
+    const auto at = graphClock.next (host, buffer.getNumSamples());
+    const bool playing = at.rolling;
+    const double hostSample = juce::jlimit (-maxSamples, maxSamples, at.sample);
     hostPlaying.store (playing, std::memory_order_relaxed);
+    timelineEstimated.store (at.estimated, std::memory_order_relaxed);
     playheadSeconds.store (juce::jlimit (0.0, kMaxPlayheadSeconds, hostSample / engine.getSampleRate()),
                            std::memory_order_relaxed);
     engine.setTransport (playing, hostSample, trackArmed.load (std::memory_order_relaxed),
